@@ -12,8 +12,9 @@ android {
         applicationId = "com.twinpower.andro"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
@@ -35,6 +36,17 @@ android {
             "/META-INF/DEPENDENCIES"
         )
     }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = true
+    }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -52,6 +64,8 @@ dependencies {
     implementation("io.ktor:ktor-server-cio-jvm:3.1.3")
     implementation("io.ktor:ktor-server-content-negotiation-jvm:3.1.3")
     implementation("io.ktor:ktor-serialization-kotlinx-json-jvm:3.1.3")
+
+    testImplementation("junit:junit:4.13.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
