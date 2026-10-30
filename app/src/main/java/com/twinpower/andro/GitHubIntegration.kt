@@ -1,4 +1,3 @@
-
 package com.twinpower.andro
 
 import android.content.Context
@@ -10,6 +9,7 @@ import android.util.Base64
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -321,6 +321,7 @@ private object GitHubApi {
 
             when (response.optString("error")) {
                 "authorization_pending" -> Unit
+
                 "slow_down" -> interval += 5
 
                 "access_denied" -> throw IllegalStateException(
