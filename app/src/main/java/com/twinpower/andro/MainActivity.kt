@@ -47,78 +47,42 @@ private fun AndroApp(
     var projects by remember {
         mutableStateOf(repository.listProjects())
     }
-
     var selected by remember {
         mutableStateOf<ProjectInfo?>(null)
     }
-
+    var files by remember {
+        mutableStateOf<List<String>>(emptyList())
+    }
     var buildState by remember {
         mutableStateOf<BuildSnapshot?>(null)
     }
-
     var mcpRunning by remember {
         mutableStateOf(false)
     }
-
     var message by remember {
         mutableStateOf("Create or import a project to begin.")
     }
-
     var task by remember {
         mutableStateOf("assembleDebug")
     }
-
     var busy by remember {
         mutableStateOf(false)
     }
-
     var screen by remember {
         mutableStateOf("Workspace")
     }
 
-    var showCreateProject by remember {
-        mutableStateOf(false)
-    }
+    var showCreateProject by remember { mutableStateOf(false) }
+    var showCreateFile by remember { mutableStateOf(false) }
+    var showCreateDirectory by remember { mutableStateOf(false) }
+    var showEditor by remember { mutableStateOf(false) }
 
-    var showCreateFile by remember {
-        mutableStateOf(false)
-    }
-
-    var showCreateDirectory by remember {
-        mutableStateOf(false)
-    }
-
-    var showEditor by remember {
-        mutableStateOf(false)
-    }
-
-    var projectName by remember {
-        mutableStateOf("")
-    }
-
-    var newFilePath by remember {
-        mutableStateOf("")
-    }
-
-    var newDirectoryPath by remember {
-        mutableStateOf("")
-    }
-
-    var editingPath by remember {
-        mutableStateOf("")
-    }
-
-    var editorContent by remember {
-        mutableStateOf("")
-    }
-
-    var editorDirty by remember {
-        mutableStateOf(false)
-    }
-
-    var files by remember {
-        mutableStateOf<List<String>>(emptyList())
-    }
+    var projectName by remember { mutableStateOf("") }
+    var newFilePath by remember { mutableStateOf("") }
+    var newDirectoryPath by remember { mutableStateOf("") }
+    var editingPath by remember { mutableStateOf("") }
+    var editorContent by remember { mutableStateOf("") }
+    var editorDirty by remember { mutableStateOf(false) }
 
     fun refreshProjects() {
         projects = repository.listProjects()
@@ -127,9 +91,11 @@ private fun AndroApp(
         }
     }
 
-    fun refreshFiles() {
-        selected?.let {
-            files = repository.listFiles(it.id)
+    fun refreshFiles(projectId: String? = selected?.id) {
+        files = if (projectId == null) {
+            emptyList()
+        } else {
+            repository.listFiles(projectId)
         }
     }
 
@@ -161,11 +127,11 @@ private fun AndroApp(
 
                 runCatching {
                     repository.importProject(uri)
-                }.onSuccess {
+                }.onSuccess { project ->
                     refreshProjects()
-                    selected = it
-                    refreshFiles()
-                    message = "Imported ${it.name}."
+                    selected = project
+                    refreshFiles(project.id)
+                    message = "Imported ${project.name}."
                 }.onFailure {
                     message = "Import failed: ${it.message}"
                 }
@@ -234,7 +200,9 @@ private fun AndroApp(
                             selected = screen == destination,
                             onClick = {
                                 screen = destination
-                                if (destination == "Workspace" ||
+
+                                if (
+                                    destination == "Workspace" ||
                                     destination == "Editor"
                                 ) {
                                     refreshFiles()
@@ -277,8 +245,7 @@ private fun AndroApp(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(18.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(10.dp)
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     Text(
                                         "LOCAL WORKSPACE",
@@ -297,8 +264,7 @@ private fun AndroApp(
                                     )
 
                                     Row(
-                                        horizontalArrangement =
-                                            Arrangement.spacedBy(8.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Button(
                                             onClick = {
@@ -330,8 +296,7 @@ private fun AndroApp(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(16.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(6.dp)
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
                                         "BUILD ENVIRONMENT",
@@ -360,7 +325,8 @@ private fun AndroApp(
                                     OutlinedButton(
                                         onClick = {
                                             toolchainPicker.launch(null)
-                                        }
+                                        },
+                                        enabled = !busy
                                     ) {
                                         Text("Import toolchain")
                                     }
@@ -389,13 +355,12 @@ private fun AndroApp(
                             projects,
                             key = { it.id }
                         ) { project ->
-
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
                                         selected = project
-                                        refreshFiles()
+                                        refreshFiles(project.id)
                                         message = "Selected ${project.name}."
                                     },
                                 colors = CardDefaults.cardColors(
@@ -409,8 +374,7 @@ private fun AndroApp(
                             ) {
                                 Column(
                                     Modifier.padding(14.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(5.dp)
+                                    verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     Text(
                                         project.name,
@@ -441,8 +405,7 @@ private fun AndroApp(
                                         Modifier
                                             .fillMaxWidth()
                                             .padding(16.dp),
-                                        verticalArrangement =
-                                            Arrangement.spacedBy(8.dp)
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
                                             "SELECTED PROJECT",
@@ -497,8 +460,7 @@ private fun AndroApp(
 
                             item {
                                 Row(
-                                    horizontalArrangement =
-                                        Arrangement.spacedBy(8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Button(
                                         onClick = {
@@ -536,7 +498,6 @@ private fun AndroApp(
                                 files,
                                 key = { it }
                             ) { path ->
-
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -547,9 +508,9 @@ private fun AndroApp(
                                                         selected!!.id,
                                                         path
                                                     )
-                                                }.onSuccess { content ->
+                                                }.onSuccess {
                                                     editingPath = path
-                                                    editorContent = content
+                                                    editorContent = it
                                                     editorDirty = false
                                                     showEditor = true
                                                 }.onFailure {
@@ -562,23 +523,24 @@ private fun AndroApp(
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
-                                            .padding(12.dp),
-                                        verticalAlignment =
-                                            Alignment.CenterVertically
+                                            .padding(14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
                                             path,
                                             modifier = Modifier.weight(1f),
                                             style = MaterialTheme.typography.bodyMedium
                                         )
-
                                         Text(
-                                            "OPEN",
-                                            color = MaterialTheme.colorScheme.secondary,
-                                            style = MaterialTheme.typography.labelSmall
+                                            "Open",
+                                            color = MaterialTheme.colorScheme.secondary
                                         )
                                     }
                                 }
+                            }
+                        } else {
+                            item {
+                                Text("Create or import a project in Workspace first.")
                             }
                         }
                     }
@@ -587,23 +549,24 @@ private fun AndroApp(
 
                         item {
                             Text(
-                                "BUILD MANAGER",
+                                "LOCAL BUILD MANAGER",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold
                             )
                         }
 
-                        item {
-                            if (selected == null) {
-                                Text("Select a project in Workspace first.")
-                            } else {
+                        if (selected == null) {
+                            item {
+                                Text("Select a project in Workspace before starting a build.")
+                            }
+                        } else {
+                            item {
                                 Card {
                                     Column(
                                         Modifier
                                             .fillMaxWidth()
                                             .padding(16.dp),
-                                        verticalArrangement =
-                                            Arrangement.spacedBy(10.dp)
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         Text(
                                             selected!!.name,
@@ -612,12 +575,8 @@ private fun AndroApp(
 
                                         OutlinedTextField(
                                             value = task,
-                                            onValueChange = {
-                                                task = it
-                                            },
-                                            label = {
-                                                Text("Gradle task")
-                                            },
+                                            onValueChange = { task = it },
+                                            label = { Text("Gradle task") },
                                             singleLine = true,
                                             modifier = Modifier.fillMaxWidth()
                                         )
@@ -654,16 +613,18 @@ private fun AndroApp(
                             }
                         }
 
-                        item {
-                            buildState?.let { state ->
+                        // Correct LazyColumn structure:
+                        // each branch adds its own item. No nested item() calls.
+                        if (buildState != null) {
+                            item {
+                                val state = buildState!!
 
                                 Card {
                                     Column(
                                         Modifier
                                             .fillMaxWidth()
                                             .padding(16.dp),
-                                        verticalArrangement =
-                                            Arrangement.spacedBy(8.dp)
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
                                             "BUILD ${state.status.uppercase()}",
@@ -681,8 +642,8 @@ private fun AndroApp(
                                         Text("Task: ${state.task}")
                                         Text("Build ID: ${state.id}")
 
-                                        if (state.exitCode != null) {
-                                            Text("Exit code: ${state.exitCode}")
+                                        state.exitCode?.let {
+                                            Text("Exit code: $it")
                                         }
 
                                         HorizontalDivider()
@@ -698,15 +659,17 @@ private fun AndroApp(
                                             style = MaterialTheme.typography.bodySmall
                                         )
 
-                                        state.artifactPaths.forEach {
+                                        state.artifactPaths.forEach { artifact ->
                                             Text(
-                                                "Artifact: $it",
+                                                "Artifact: $artifact",
                                                 style = MaterialTheme.typography.labelSmall
                                             )
                                         }
                                     }
                                 }
-                            } ?: item {
+                            }
+                        } else {
+                            item {
                                 Text("No build has been started in this session.")
                             }
                         }
@@ -728,8 +691,7 @@ private fun AndroApp(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(16.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(8.dp)
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     Text(
                                         "LOCAL MCP SERVER",
@@ -741,8 +703,7 @@ private fun AndroApp(
                                     )
 
                                     Row(
-                                        verticalAlignment =
-                                            Alignment.CenterVertically
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
                                             if (mcpRunning) {
@@ -794,15 +755,14 @@ private fun AndroApp(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(16.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(6.dp)
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
                                         "GITHUB",
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        "GitHub repository authorization and synchronization are not implemented in this phase."
+                                        "GitHub repository authorization and synchronization are not implemented yet."
                                     )
                                 }
                             }
@@ -814,15 +774,14 @@ private fun AndroApp(
                                     Modifier
                                         .fillMaxWidth()
                                         .padding(16.dp),
-                                    verticalArrangement =
-                                        Arrangement.spacedBy(6.dp)
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
                                         "ANDRO-SERVER",
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        "Remote build-server connection is not implemented in this phase."
+                                        "Remote build-server connection is not implemented yet."
                                     )
                                 }
                             }
@@ -851,12 +810,8 @@ private fun AndroApp(
                 text = {
                     OutlinedTextField(
                         value = projectName,
-                        onValueChange = {
-                            projectName = it
-                        },
-                        label = {
-                            Text("Project name")
-                        },
+                        onValueChange = { projectName = it },
+                        label = { Text("Project name") },
                         singleLine = true
                     )
                 },
@@ -868,10 +823,10 @@ private fun AndroApp(
 
                                 runCatching {
                                     repository.createProject(projectName)
-                                }.onSuccess {
+                                }.onSuccess { project ->
                                     refreshProjects()
-                                    selected = it
-                                    refreshFiles()
+                                    selected = project
+                                    refreshFiles(project.id)
                                     projectName = ""
                                     screen = "Editor"
                                     message = "Project created."
@@ -912,12 +867,8 @@ private fun AndroApp(
                 text = {
                     OutlinedTextField(
                         value = newFilePath,
-                        onValueChange = {
-                            newFilePath = it
-                        },
-                        label = {
-                            Text("File path")
-                        },
+                        onValueChange = { newFilePath = it },
+                        label = { Text("File path") },
                         placeholder = {
                             Text("app/src/main/java/MainActivity.kt")
                         },
@@ -943,7 +894,7 @@ private fun AndroApp(
 
                             showCreateFile = false
                         },
-                        enabled = newFilePath.isNotBlank()
+                        enabled = newFilePath.isNotBlank() && selected != null
                     ) {
                         Text("Create")
                     }
@@ -971,12 +922,8 @@ private fun AndroApp(
                 text = {
                     OutlinedTextField(
                         value = newDirectoryPath,
-                        onValueChange = {
-                            newDirectoryPath = it
-                        },
-                        label = {
-                            Text("Folder path")
-                        },
+                        onValueChange = { newDirectoryPath = it },
+                        label = { Text("Folder path") },
                         placeholder = {
                             Text("app/src/main/java")
                         },
@@ -1002,7 +949,8 @@ private fun AndroApp(
 
                             showCreateDirectory = false
                         },
-                        enabled = newDirectoryPath.isNotBlank()
+                        enabled = newDirectoryPath.isNotBlank() &&
+                            selected != null
                     ) {
                         Text("Create")
                     }
@@ -1062,7 +1010,7 @@ private fun AndroApp(
                                     "Save failed: ${it.message}"
                             }
                         },
-                        enabled = editorDirty
+                        enabled = editorDirty && selected != null
                     ) {
                         Text("Save")
                     }
