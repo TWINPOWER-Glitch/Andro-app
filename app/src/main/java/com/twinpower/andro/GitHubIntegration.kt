@@ -542,9 +542,9 @@ jobs:
         shell: bash
         run: |
           if [[ -f settings.gradle || -f settings.gradle.kts ]] && [[ -f app/build.gradle || -f app/build.gradle.kts ]]; then
-            echo "android_project=true" >> "$GITHUB_OUTPUT"
+            echo "android_project=true" >> "${'$'}GITHUB_OUTPUT"
           else
-            echo "android_project=false" >> "$GITHUB_OUTPUT"
+            echo "android_project=false" >> "${'$'}GITHUB_OUTPUT"
           fi
 
       - name: Explain empty repository
@@ -1439,8 +1439,7 @@ fun GitHubConnections() {
                     OutlinedTextField(
                         value = newRepositoryName,
                         onValueChange = {
-                            newRepositoryName = it
-                                .replace(" ", "-")
+                            newRepositoryName = it.replace(" ", "-")
                         },
                         label = { Text("Repository name") },
                         singleLine = true
