@@ -1,9 +1,12 @@
-name: Andro Android App Build Verification
+
+name: Andro Android CI, APK Tests and Releases
 
 on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
     paths:
       - "app/**"
       - "*.gradle.kts"
@@ -15,21 +18,27 @@ on:
       - "app/**"
       - "*.gradle.kts"
       - "gradle.properties"
+      - ".github/workflows/andro-app-build-check.yml"
 
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: andro-app-build-${{ github.ref }}
+  group: andro-app-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Compile Andro Android App
+    name: Test and Build Android APKs
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
+
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
 
     steps:
       - name: Checkout source
@@ -41,7 +50,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
@@ -52,20 +61,184 @@ jobs:
           accept-android-sdk-licenses: true
           packages: platform-tools
 
-      - name: Install Android SDK 36
+      - name: Install Android SDK packages
         run: |
           sdkmanager \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Compile debug APK
+      - name: Read application version
+        id: version
+        shell: bash
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          VERSION_CODE=$(grep -oP 'versionCode = \K[0-9]+' app/build.gradle.kts)
+
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=andro-apks-v$VERSION_NAME" >> "$GITHUB_OUTPUT"
+
+          echo "Andro version: $VERSION_NAME"
+          echo "Version code: $VERSION_CODE"
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          EXPECTED="v${{ steps.version.outputs.version_name }}"
+          ACTUAL="${GITHUB_REF_NAME}"
+
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "Tag $ACTUAL does not match app version $EXPECTED"
+            exit 1
+          fi
+
+      - name: Run unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Run Android lint
+        run: gradle --no-daemon lintDebug
+
+      - name: Build debug APK
         run: gradle --no-daemon assembleDebug
 
-      - name: Upload debug APK
+      - name: Build release APK
+        run: gradle --no-daemon assembleRelease
+
+      - name: Validate APK outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+
+          test -s "$DEBUG_APK"
+          test -s "$RELEASE_APK"
+
+          unzip -t "$DEBUG_APK"
+          unzip -t "$RELEASE_APK"
+
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" \
+            dump badging "$DEBUG_APK" | head -n 5
+
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" \
+            dump badging "$RELEASE_APK" | head -n 5
+
+          echo "Both APK archives passed validation."
+
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: andro-app-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release-unsigned.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: andro-lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
           retention-days: 7
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: andro-unit-test-reports
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  apk-smoke-test:
+    name: Install and Launch APK on Android Emulator
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: apks
+
+      - name: Locate debug APK
+        id: apk
+        shell: bash
+        run: |
+          APK=$(find apks -name "app-debug.apk" -print -quit)
+          test -n "$APK"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Install and launch Andro
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          script: |
+            adb install -r "${{ steps.apk.outputs.path }}"
+
+            adb shell am force-stop com.twinpower.andro
+
+            adb shell am start -W \
+              -n com.twinpower.andro/.MainActivity
+
+            sleep 10
+
+            adb shell pidof com.twinpower.andro
+
+            adb shell dumpsys activity activities \
+              | grep -E "mResumedActivity|topResumedActivity"
+
+            echo "Andro APK installation and launch test passed."
+
+  release:
+    name: Publish Versioned GitHub Release
+    needs:
+      - build
+      - apk-smoke-test
+
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-apks
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Andro v${{ needs.build.outputs.version_name }}
+          generate_release_notes: true
+          files: |
+            release-apks/app-debug.apk
+            release-apks/app-release-unsigned.apk
+          body: |
+            ## Andro v${{ needs.build.outputs.version_name }}
+
+            Version code: ${{ needs.build.outputs.version_code }}
+
+            Automated checks completed:
+            - Unit-test task
+            - Android lint
+            - Debug APK build
+            - Release APK build
+            - APK archive validation
+            - Android emulator installation and launch test
+
+            Note: The release APK is unsigned. The debug APK is signed
+            with the Android debug key and is intended for testing.
