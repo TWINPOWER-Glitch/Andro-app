@@ -1,3 +1,4 @@
+
 name: Andro Android CI, APK Tests and Releases
 
 on:
@@ -22,7 +23,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: andro-app-${{ github.ref }}
@@ -71,8 +72,13 @@ jobs:
         id: version
         shell: bash
         run: |
+          set -euo pipefail
+
           VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
           VERSION_CODE=$(grep -oP 'versionCode = \K[0-9]+' app/build.gradle.kts)
+
+          test -n "$VERSION_NAME"
+          test -n "$VERSION_CODE"
 
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
@@ -175,8 +181,12 @@ jobs:
         id: apk
         shell: bash
         run: |
+          set -euo pipefail
+
           APK=$(find apks -name "app-debug.apk" -print -quit)
+
           test -n "$APK"
+
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Install and launch Andro
@@ -188,19 +198,23 @@ jobs:
           profile: pixel_2
           disable-animations: true
           script: |
+            set -euo pipefail
+
             adb install -r "${{ steps.apk.outputs.path }}"
 
             adb shell am force-stop com.twinpower.andro
 
-            adb shell am start -W \
-              -n com.twinpower.andro/.MainActivity
+            adb shell am start -W -n com.twinpower.andro/.MainActivity
 
             sleep 10
 
-            adb shell pidof com.twinpower.andro
+            PID="$(adb shell pidof com.twinpower.andro | tr -d '\r')"
+
+            test -n "$PID"
 
             adb shell dumpsys activity activities \
-              | grep -E "mResumedActivity|topResumedActivity"
+              | grep -E "mResumedActivity|topResumedActivity" \
+              | grep -F "com.twinpower.andro"
 
             echo "Andro APK installation and launch test passed."
 
@@ -211,6 +225,9 @@ jobs:
       - apk-smoke-test
 
     if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
 
     runs-on: ubuntu-latest
 
