@@ -749,6 +749,12 @@ private fun AndroApp(
                             }
                         }
                         item {
+                            CloudflareMcpConnections(
+                                mcp = mcp,
+                                onLocalServerStarted = { mcpRunning = true }
+                            )
+                        }
+                        item {
                             GitHubConnections()
                         }
 
