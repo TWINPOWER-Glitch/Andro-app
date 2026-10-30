@@ -1,11 +1,15 @@
+
 package com.twinpower.andro
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -48,7 +52,8 @@ private data class GitHubDeviceCode(
     val userCode: String,
     val verificationUri: String,
     val expiresIn: Int,
-    val interval: Int
+    val interval: Int,
+    val createdAtMillis: Long = System.currentTimeMillis()
 )
 
 private data class GitHubEntry(
@@ -58,9 +63,10 @@ private data class GitHubEntry(
     val size: Long
 )
 
-private object GitHubTokenStore {
+private object GitHubSecureStore {
     private const val PREFS = "andro_github_secure"
     private const val TOKEN = "encrypted_token"
+    private const val PENDING = "encrypted_pending_auth"
     private const val ALIAS = "andro_github_token_key"
 
     private fun key(): SecretKey {
@@ -92,70 +98,117 @@ private object GitHubTokenStore {
         return generator.generateKey()
     }
 
-    fun save(context: Context, token: String) {
+    private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
 
         val encrypted = cipher.doFinal(
-            token.toByteArray(Charsets.UTF_8)
+            value.toByteArray(Charsets.UTF_8)
         )
 
-        val payload = cipher.iv + encrypted
-        val encoded = Base64.encodeToString(
-            payload,
+        return Base64.encodeToString(
+            cipher.iv + encrypted,
             Base64.NO_WRAP
         )
+    }
 
+    private fun decrypt(value: String): String {
+        val payload = Base64.decode(value, Base64.NO_WRAP)
+        require(payload.size > 12)
+
+        val iv = payload.copyOfRange(0, 12)
+        val encrypted = payload.copyOfRange(12, payload.size)
+
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            key(),
+            GCMParameterSpec(128, iv)
+        )
+
+        return String(
+            cipher.doFinal(encrypted),
+            Charsets.UTF_8
+        )
+    }
+
+    fun saveToken(context: Context, token: String) {
         context.getSharedPreferences(
             PREFS,
             Context.MODE_PRIVATE
         ).edit()
-            .putString(TOKEN, encoded)
+            .putString(TOKEN, encrypt(token))
             .apply()
     }
 
-    fun read(context: Context): String? {
-        val encoded = context.getSharedPreferences(
+    fun readToken(context: Context): String? {
+        val value = context.getSharedPreferences(
             PREFS,
             Context.MODE_PRIVATE
         ).getString(TOKEN, null) ?: return null
 
         return runCatching {
-            val payload = Base64.decode(
-                encoded,
-                Base64.NO_WRAP
-            )
-
-            require(payload.size > 12)
-
-            val iv = payload.copyOfRange(0, 12)
-            val encrypted = payload.copyOfRange(
-                12,
-                payload.size
-            )
-
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                key(),
-                GCMParameterSpec(128, iv)
-            )
-
-            String(
-                cipher.doFinal(encrypted),
-                Charsets.UTF_8
-            )
+            decrypt(value)
         }.getOrNull()
     }
 
-    fun clear(context: Context) {
+    fun clearToken(context: Context) {
         context.getSharedPreferences(
             PREFS,
             Context.MODE_PRIVATE
         ).edit()
             .remove(TOKEN)
             .apply()
+    }
+
+    fun savePending(
+        context: Context,
+        device: GitHubDeviceCode
+    ) {
+        val json = JSONObject().apply {
+            put("device_code", device.deviceCode)
+            put("user_code", device.userCode)
+            put("verification_uri", device.verificationUri)
+            put("expires_in", device.expiresIn)
+            put("interval", device.interval)
+            put("created_at", device.createdAtMillis)
+        }
+
+        context.getSharedPreferences(
+            PREFS,
+            Context.MODE_PRIVATE
+        ).edit()
+            .putString(PENDING, encrypt(json.toString()))
+            .commit()
+    }
+
+    fun readPending(context: Context): GitHubDeviceCode? {
+        val value = context.getSharedPreferences(
+            PREFS,
+            Context.MODE_PRIVATE
+        ).getString(PENDING, null) ?: return null
+
+        return runCatching {
+            val json = JSONObject(decrypt(value))
+
+            GitHubDeviceCode(
+                deviceCode = json.getString("device_code"),
+                userCode = json.getString("user_code"),
+                verificationUri = json.getString("verification_uri"),
+                expiresIn = json.getInt("expires_in"),
+                interval = json.getInt("interval"),
+                createdAtMillis = json.getLong("created_at")
+            )
+        }.getOrNull()
+    }
+
+    fun clearPending(context: Context) {
+        context.getSharedPreferences(
+            PREFS,
+            Context.MODE_PRIVATE
+        ).edit()
+            .remove(PENDING)
+            .commit()
     }
 }
 
@@ -177,6 +230,7 @@ private object GitHubApi {
         method: String = "GET",
         token: String? = null,
         body: String? = null,
+        contentType: String = "application/json",
         accept: String = "application/vnd.github+json"
     ): String {
         val connection =
@@ -184,8 +238,8 @@ private object GitHubApi {
 
         try {
             connection.requestMethod = method
-            connection.connectTimeout = 15000
-            connection.readTimeout = 20000
+            connection.connectTimeout = 20000
+            connection.readTimeout = 30000
 
             connection.setRequestProperty("Accept", accept)
             connection.setRequestProperty(
@@ -208,7 +262,7 @@ private object GitHubApi {
                 connection.doOutput = true
                 connection.setRequestProperty(
                     "Content-Type",
-                    "application/x-www-form-urlencoded"
+                    contentType
                 )
 
                 connection.outputStream.use {
@@ -261,6 +315,7 @@ private object GitHubApi {
                     body = form(
                         "client_id" to GITHUB_APP_CLIENT_ID
                     ),
+                    contentType = "application/x-www-form-urlencoded",
                     accept = "application/json"
                 )
             )
@@ -289,15 +344,18 @@ private object GitHubApi {
     suspend fun pollForToken(
         device: GitHubDeviceCode
     ): String = withContext(Dispatchers.IO) {
-
         val deadline =
-            System.currentTimeMillis() +
-                device.expiresIn * 1000L
+            device.createdAtMillis + device.expiresIn * 1000L
 
         var interval = device.interval.coerceAtLeast(5)
 
         while (System.currentTimeMillis() < deadline) {
-            delay(interval * 1000L)
+            val remaining =
+                deadline - System.currentTimeMillis()
+
+            delay(minOf(interval * 1000L, remaining))
+
+            if (System.currentTimeMillis() >= deadline) break
 
             val response = JSONObject(
                 request(
@@ -309,6 +367,7 @@ private object GitHubApi {
                         "grant_type" to
                             "urn:ietf:params:oauth:grant-type:device_code"
                     ),
+                    contentType = "application/x-www-form-urlencoded",
                     accept = "application/json"
                 )
             )
@@ -353,35 +412,207 @@ private object GitHubApi {
         token: String
     ): List<GitHubRepository> =
         withContext(Dispatchers.IO) {
-            val response = JSONArray(
-                request(
-                    API +
-                        "/user/repos?per_page=100&sort=updated" +
-                        "&affiliation=owner,collaborator,organization_member",
-                    token = token
-                )
-            )
-
             buildList {
-                for (index in 0 until response.length()) {
-                    val repo = response.getJSONObject(index)
+                var page = 1
 
-                    add(
-                        GitHubRepository(
-                            id = repo.optLong("id"),
-                            name = repo.optString("name"),
-                            fullName = repo.optString("full_name"),
-                            private = repo.optBoolean("private"),
-                            defaultBranch = repo.optString(
-                                "default_branch",
-                                "main"
-                            ),
-                            htmlUrl = repo.optString("html_url")
+                while (page <= 10) {
+                    val response = JSONArray(
+                        request(
+                            API +
+                                "/user/repos?per_page=100&page=$page" +
+                                "&sort=updated" +
+                                "&affiliation=owner,collaborator,organization_member",
+                            token = token
                         )
                     )
+
+                    for (index in 0 until response.length()) {
+                        val repo = response.getJSONObject(index)
+
+                        add(
+                            GitHubRepository(
+                                id = repo.optLong("id"),
+                                name = repo.optString("name"),
+                                fullName = repo.optString("full_name"),
+                                private = repo.optBoolean("private"),
+                                defaultBranch = repo.optString(
+                                    "default_branch",
+                                    "main"
+                                ),
+                                htmlUrl = repo.optString("html_url")
+                            )
+                        )
+                    }
+
+                    if (response.length() < 100) break
+                    page++
                 }
             }
         }
+
+    suspend fun createRepository(
+        token: String,
+        name: String,
+        description: String,
+        private: Boolean
+    ): GitHubRepository = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("name", name)
+            put("description", description)
+            put("private", private)
+            put("auto_init", true)
+            put("has_issues", true)
+            put("has_projects", false)
+            put("has_wiki", false)
+        }
+
+        val response = JSONObject(
+            request(
+                url = "$API/user/repos",
+                method = "POST",
+                token = token,
+                body = body.toString()
+            )
+        )
+
+        GitHubRepository(
+            id = response.optLong("id"),
+            name = response.optString("name"),
+            fullName = response.optString("full_name"),
+            private = response.optBoolean("private"),
+            defaultBranch = response.optString(
+                "default_branch",
+                "main"
+            ),
+            htmlUrl = response.optString("html_url")
+        )
+    }
+
+    suspend fun installBuildWorkflow(
+        token: String,
+        repo: GitHubRepository
+    ) = withContext(Dispatchers.IO) {
+        val workflow = """
+name: Andro Android Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-build:
+    name: Android tests and APK build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" "build-tools;36.0.0"
+
+      - name: Detect Android Gradle project
+        id: detect
+        shell: bash
+        run: |
+          if [[ -f settings.gradle || -f settings.gradle.kts ]] && [[ -f app/build.gradle || -f app/build.gradle.kts ]]; then
+            echo "android_project=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "android_project=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Explain empty repository
+        if: steps.detect.outputs.android_project != 'true'
+        run: |
+          echo "Andro build workflow is installed."
+          echo "No Android Gradle project was found yet."
+          echo "Add the Android project source files and push again to start an APK build."
+
+      - name: Run tests, lint and build APKs
+        if: steps.detect.outputs.android_project == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f ./gradlew ]]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug assembleRelease
+          else
+            gradle --no-daemon testDebugUnitTest lintDebug assembleDebug assembleRelease
+          fi
+
+      - name: Upload debug APK
+        if: steps.detect.outputs.android_project == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: andro-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload release APK
+        if: steps.detect.outputs.android_project == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: andro-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "Andro Android workflow finished."
+        """.trimIndent()
+
+        val encodedContent = Base64.encodeToString(
+            workflow.toByteArray(Charsets.UTF_8),
+            Base64.NO_WRAP
+        )
+
+        val body = JSONObject().apply {
+            put(
+                "message",
+                "Add Andro Android build workflow"
+            )
+            put("content", encodedContent)
+            put("branch", repo.defaultBranch)
+        }
+
+        request(
+            url = "$API/repos/${repo.fullName}/contents/" +
+                ".github/workflows/andro-android-build.yml",
+            method = "PUT",
+            token = token,
+            body = body.toString()
+        )
+    }
 
     suspend fun branches(
         token: String,
@@ -460,9 +691,7 @@ private object GitHubApi {
             request(url, token = token)
         )
 
-        val size = response.optLong("size")
-
-        require(size <= 512 * 1024) {
+        require(response.optLong("size") <= 512 * 1024) {
             "File is larger than the 512 KB preview limit."
         }
 
@@ -492,7 +721,11 @@ fun GitHubConnections() {
     val scope = rememberCoroutineScope()
 
     var token by remember {
-        mutableStateOf(GitHubTokenStore.read(context))
+        mutableStateOf(GitHubSecureStore.readToken(context))
+    }
+
+    var pendingAuth by remember {
+        mutableStateOf(GitHubSecureStore.readPending(context))
     }
 
     var repositories by remember {
@@ -539,16 +772,28 @@ fun GitHubConnections() {
         mutableStateOf("")
     }
 
-    var deviceCode by remember {
-        mutableStateOf<GitHubDeviceCode?>(null)
-    }
-
     var loading by remember {
         mutableStateOf(false)
     }
 
     var status by remember {
-        mutableStateOf("Connect GitHub to browse your repositories.")
+        mutableStateOf("Connect GitHub to browse and manage repositories.")
+    }
+
+    var showCreateRepository by remember {
+        mutableStateOf(false)
+    }
+
+    var newRepositoryName by remember {
+        mutableStateOf("")
+    }
+
+    var newRepositoryDescription by remember {
+        mutableStateOf("")
+    }
+
+    var newRepositoryPrivate by remember {
+        mutableStateOf(true)
     }
 
     fun loadRepositories(activeToken: String) {
@@ -564,7 +809,7 @@ fun GitHubConnections() {
                 status = it.message ?: "Could not load repositories."
 
                 if (it.message?.contains("HTTP 401") == true) {
-                    GitHubTokenStore.clear(context)
+                    GitHubSecureStore.clearToken(context)
                     token = null
                     repositories = emptyList()
                 }
@@ -597,7 +842,8 @@ fun GitHubConnections() {
                 entrySearch = ""
                 status = "${it.size} items · ${repo.fullName}"
             }.onFailure {
-                status = it.message ?: "Could not load repository contents."
+                status = it.message
+                    ?: "Could not load repository contents."
             }
 
             loading = false
@@ -609,7 +855,35 @@ fun GitHubConnections() {
         loadRepositories(activeToken)
     }
 
-    LaunchedEffect(selectedRepo?.fullName) {
+    LaunchedEffect(
+        pendingAuth?.deviceCode,
+        token
+    ) {
+        val device = pendingAuth ?: return@LaunchedEffect
+        if (token != null) return@LaunchedEffect
+
+        loading = true
+        status = "Waiting for GitHub authorization..."
+
+        runCatching {
+            GitHubApi.pollForToken(device)
+        }.onSuccess { newToken ->
+            GitHubSecureStore.saveToken(context, newToken)
+            GitHubSecureStore.clearPending(context)
+
+            pendingAuth = null
+            token = newToken
+            status = "GitHub connected successfully."
+        }.onFailure {
+            GitHubSecureStore.clearPending(context)
+            pendingAuth = null
+            status = it.message ?: "Authorization failed."
+        }
+
+        loading = false
+    }
+
+    LaunchedEffect(selectedRepo?.fullName, token) {
         val activeToken = token ?: return@LaunchedEffect
         val repo = selectedRepo ?: return@LaunchedEffect
 
@@ -620,11 +894,9 @@ fun GitHubConnections() {
         }.onSuccess { result ->
             branches = result
 
-            val initialBranch = result.firstOrNull {
+            selectedBranch = result.firstOrNull {
                 it == repo.defaultBranch
             } ?: result.firstOrNull() ?: repo.defaultBranch
-
-            selectedBranch = initialBranch
         }.onFailure {
             branches = listOf(repo.defaultBranch)
             selectedBranch = repo.defaultBranch
@@ -666,7 +938,7 @@ fun GitHubConnections() {
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    "GITHUB",
+                    "GITHUB INTEGRATION",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -682,7 +954,7 @@ fun GitHubConnections() {
                     )
                 }
 
-                if (token == null && deviceCode == null) {
+                if (token == null && pendingAuth == null) {
                     Button(
                         enabled = !loading,
                         onClick = {
@@ -692,33 +964,19 @@ fun GitHubConnections() {
                                 runCatching {
                                     GitHubApi.requestDeviceCode()
                                 }.onSuccess { code ->
-                                    deviceCode = code
-                                    status = "Authorize Andro using this code."
+                                    GitHubSecureStore.savePending(
+                                        context,
+                                        code
+                                    )
 
-                                    scope.launch {
-                                        runCatching {
-                                            GitHubApi.pollForToken(code)
-                                        }.onSuccess { newToken ->
-                                            GitHubTokenStore.save(
-                                                context,
-                                                newToken
-                                            )
-                                            token = newToken
-                                            deviceCode = null
-                                            status = "GitHub connected."
-                                        }.onFailure {
-                                            status = it.message
-                                                ?: "Authorization failed."
-                                            deviceCode = null
-                                        }
-
-                                        loading = false
-                                    }
+                                    pendingAuth = code
+                                    status = "Copy the code and authorize Andro on GitHub."
                                 }.onFailure {
                                     status = it.message
                                         ?: "Could not start authorization."
-                                    loading = false
                                 }
+
+                                loading = false
                             }
                         }
                     ) {
@@ -726,34 +984,80 @@ fun GitHubConnections() {
                     }
                 }
 
-                deviceCode?.let { code ->
+                pendingAuth?.let { code ->
                     Text(
-                        "YOUR DEVICE CODE",
+                        "YOUR GITHUB DEVICE CODE",
                         fontWeight = FontWeight.Bold
                     )
 
-                    Text(
-                        code.userCode,
-                        style = MaterialTheme.typography.headlineMedium
-                    )
+                    SelectionContainer {
+                        Text(
+                            code.userCode,
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
 
-                    Button(
-                        onClick = {
-                            context.startActivity(
-                                Intent(
-                                    Intent.ACTION_VIEW,
-                                    Uri.parse(code.verificationUri)
-                                )
-                            )
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("Authorize on GitHub")
+                        Button(
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                val clipboard =
+                                    context.getSystemService(
+                                        Context.CLIPBOARD_SERVICE
+                                    ) as ClipboardManager
+
+                                clipboard.setPrimaryClip(
+                                    ClipData.newPlainText(
+                                        "GitHub device code",
+                                        code.userCode
+                                    )
+                                )
+
+                                Toast.makeText(
+                                    context,
+                                    "Device code copied",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        ) {
+                            Text("Copy code")
+                        }
+
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                context.startActivity(
+                                    Intent(
+                                        Intent.ACTION_VIEW,
+                                        Uri.parse(code.verificationUri)
+                                    )
+                                )
+                            }
+                        ) {
+                            Text("Open GitHub")
+                        }
                     }
 
                     Text(
-                        "Keep Andro open until authorization completes.",
+                        "Authorization continues while you use the browser. " +
+                            "Andro saves this pending authorization securely " +
+                            "so it can resume if Android recreates the app.",
                         style = MaterialTheme.typography.bodySmall
                     )
+
+                    TextButton(
+                        onClick = {
+                            GitHubSecureStore.clearPending(context)
+                            pendingAuth = null
+                            status = "GitHub authorization cancelled."
+                        }
+                    ) {
+                        Text("Cancel authorization")
+                    }
                 }
 
                 if (token != null) {
@@ -771,8 +1075,11 @@ fun GitHubConnections() {
 
                         OutlinedButton(
                             onClick = {
-                                GitHubTokenStore.clear(context)
+                                GitHubSecureStore.clearToken(context)
+                                GitHubSecureStore.clearPending(context)
+
                                 token = null
+                                pendingAuth = null
                                 repositories = emptyList()
                                 selectedRepo = null
                                 entries = emptyList()
@@ -795,12 +1102,33 @@ fun GitHubConnections() {
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        "REPOSITORY EXPLORER",
+                        "REPOSITORY MANAGEMENT",
                         fontWeight = FontWeight.Bold
                     )
 
                     Text(
-                        "Choose a repository to browse its branches, folders and source files."
+                        "Browse existing repositories or create a new repository. " +
+                            "New repositories receive an Andro Android build workflow."
+                    )
+
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !loading,
+                        onClick = {
+                            newRepositoryName = ""
+                            newRepositoryDescription = ""
+                            newRepositoryPrivate = true
+                            showCreateRepository = true
+                        }
+                    ) {
+                        Text("＋ Create new repository")
+                    }
+
+                    HorizontalDivider()
+
+                    Text(
+                        "REPOSITORY EXPLORER",
+                        fontWeight = FontWeight.Bold
                     )
 
                     OutlinedTextField(
@@ -952,8 +1280,8 @@ fun GitHubConnections() {
                         TextButton(
                             enabled = currentPath.isNotBlank(),
                             onClick = {
-                                val parent = currentPath
-                                    .substringBeforeLast("/", "")
+                                val parent =
+                                    currentPath.substringBeforeLast("/", "")
 
                                 val activeToken = token
                                 if (activeToken != null) {
@@ -970,11 +1298,7 @@ fun GitHubConnections() {
                         }
 
                         Text(
-                            if (currentPath.isBlank()) {
-                                "/"
-                            } else {
-                                "/$currentPath"
-                            },
+                            if (currentPath.isBlank()) "/" else "/$currentPath",
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -1013,7 +1337,8 @@ fun GitHubConnections() {
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    val activeToken = token ?: return@clickable
+                                    val activeToken =
+                                        token ?: return@clickable
 
                                     if (entry.type == "dir") {
                                         loadDirectory(
@@ -1097,6 +1422,140 @@ fun GitHubConnections() {
                 }
             }
         }
+    }
+
+    if (showCreateRepository) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!loading) showCreateRepository = false
+            },
+            title = {
+                Text("Create GitHub repository")
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = newRepositoryName,
+                        onValueChange = {
+                            newRepositoryName = it
+                                .replace(" ", "-")
+                        },
+                        label = { Text("Repository name") },
+                        singleLine = true
+                    )
+
+                    OutlinedTextField(
+                        value = newRepositoryDescription,
+                        onValueChange = {
+                            newRepositoryDescription = it
+                        },
+                        label = { Text("Description") },
+                        minLines = 2
+                    )
+
+                    Row(
+                        verticalAlignment =
+                            androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = newRepositoryPrivate,
+                            onCheckedChange = {
+                                newRepositoryPrivate = it
+                            }
+                        )
+
+                        Text("Private repository")
+                    }
+
+                    Text(
+                        "Andro will initialize the repository and commit " +
+                            ".github/workflows/andro-android-build.yml.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+
+                    if (loading) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newRepositoryName.isNotBlank() && !loading,
+                    onClick = {
+                        val activeToken =
+                            token ?: return@TextButton
+
+                        scope.launch {
+                            loading = true
+                            status = "Creating GitHub repository..."
+
+                            var createdRepo: GitHubRepository? = null
+
+                            runCatching {
+                                GitHubApi.createRepository(
+                                    token = activeToken,
+                                    name = newRepositoryName.trim(),
+                                    description =
+                                        newRepositoryDescription.trim(),
+                                    private = newRepositoryPrivate
+                                )
+                            }.onSuccess { repo ->
+                                createdRepo = repo
+                                status = "Repository created. Installing build workflow..."
+
+                                runCatching {
+                                    GitHubApi.installBuildWorkflow(
+                                        activeToken,
+                                        repo
+                                    )
+                                }.onSuccess {
+                                    status =
+                                        "Repository created and Andro build workflow committed."
+                                }.onFailure {
+                                    status =
+                                        "Repository created, but workflow commit failed: " +
+                                            (it.message ?: "Unknown error")
+                                }
+
+                                repositories =
+                                    runCatching {
+                                        GitHubApi.repositories(activeToken)
+                                    }.getOrDefault(repositories)
+
+                                showCreateRepository = false
+                                newRepositoryName = ""
+                                newRepositoryDescription = ""
+                            }.onFailure {
+                                status = it.message
+                                    ?: "Repository creation failed."
+                            }
+
+                            if (createdRepo != null) {
+                                selectedRepo = null
+                            }
+
+                            loading = false
+                        }
+                    }
+                ) {
+                    Text("Create and configure")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !loading,
+                    onClick = {
+                        showCreateRepository = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     if (previewTitle != null) {
