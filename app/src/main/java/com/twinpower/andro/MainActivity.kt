@@ -748,26 +748,13 @@ private fun AndroApp(
                                 }
                             }
                         }
-
                         item {
-                            Card {
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        "GITHUB",
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        "GitHub repository authorization and synchronization are not implemented yet."
-                                    )
-                                }
-                            }
+                            GitHubConnections()
                         }
 
+            
+
+                        
                         item {
                             Card {
                                 Column(
