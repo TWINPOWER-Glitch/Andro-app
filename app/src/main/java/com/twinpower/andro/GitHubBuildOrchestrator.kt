@@ -3,6 +3,7 @@ package com.twinpower.andro
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 import java.time.Instant
 
@@ -52,12 +53,15 @@ class GitHubBuildOrchestrator(
         require(request.owner.isNotBlank()) {
             "GitHub owner is required."
         }
+
         require(request.repository.isNotBlank()) {
             "GitHub repository is required."
         }
+
         require(request.branch.isNotBlank()) {
             "GitHub branch is required."
         }
+
         require(request.workflowId > 0) {
             "A valid workflow ID is required."
         }
@@ -156,6 +160,45 @@ class GitHubBuildOrchestrator(
         RemoteBuildStatus(
             run = run,
             artifacts = artifacts
+        )
+    }
+
+    /**
+     * Downloads a successful workflow artifact into the selected project.
+     *
+     * The artifact is extracted under:
+     * build/andro-artifacts/artifact-{artifactId}
+     *
+     * This directory is kept separate from source files and is excluded
+     * from normal GitHub project synchronization.
+     */
+    suspend fun downloadArtifact(
+        project: ProjectInfo,
+        owner: String,
+        repository: String,
+        artifact: GitHubArtifact
+    ): File = withContext(Dispatchers.IO) {
+        require(artifact.id > 0) {
+            "Invalid artifact ID."
+        }
+
+        require(!artifact.expired) {
+            "This GitHub artifact has expired and cannot be downloaded."
+        }
+
+        require(owner.isNotBlank()) {
+            "GitHub owner is required."
+        }
+
+        require(repository.isNotBlank()) {
+            "GitHub repository is required."
+        }
+
+        workflows.downloadArtifact(
+            owner = owner,
+            repository = repository,
+            project = project,
+            artifactId = artifact.id
         )
     }
 
