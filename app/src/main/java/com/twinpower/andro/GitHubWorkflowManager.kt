@@ -7,8 +7,12 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FilterInputStream
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 
 data class GitHubWorkflow(
     val id: Long,
@@ -47,9 +51,21 @@ data class GitHubArtifact(
 class GitHubWorkflowManager(
     private val tokenProvider: () -> String?
 ) {
+    companion object {
+        private const val API = "https://api.github.com"
+
+        private const val MAX_ARTIFACT_DOWNLOAD_BYTES =
+            500L * 1024L * 1024L
+
+        private const val MAX_EXTRACTED_BYTES =
+            500L * 1024L * 1024L
+
+        private const val MAX_ARCHIVE_ENTRIES = 2000
+    }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
@@ -80,9 +96,11 @@ class GitHubWorkflowManager(
             "POST" -> builder.post(
                 (body ?: "{}").toRequestBody(jsonMediaType)
             )
+
             "PATCH" -> builder.patch(
                 (body ?: "{}").toRequestBody(jsonMediaType)
             )
+
             else -> builder.get()
         }
 
@@ -134,7 +152,7 @@ class GitHubWorkflowManager(
         repository: String
     ): String {
         validateRepository(owner, repository)
-        return "https://api.github.com/repos/$owner/$repository"
+        return "$API/repos/$owner/$repository"
     }
 
     fun listWorkflows(
@@ -210,6 +228,7 @@ class GitHubWorkflowManager(
 
         val query = buildString {
             append("?per_page=$perPage")
+
             if (!branch.isNullOrBlank()) {
                 append("&branch=${encode(branch)}")
             }
@@ -285,6 +304,290 @@ class GitHubWorkflowManager(
         }
     }
 
+    /**
+     * Downloads an Actions artifact ZIP and extracts it into:
+     *
+     * project/build/andro-artifacts/
+     *
+     * The returned File is the extracted artifact directory.
+     */
+    fun downloadArtifact(
+        owner: String,
+        repository: String,
+        project: ProjectInfo,
+        artifactId: Long
+    ): File {
+        require(artifactId > 0) {
+            "Invalid artifact ID."
+        }
+
+        val projectRoot = File(project.rootPath).canonicalFile
+
+        require(
+            projectRoot.isDirectory &&
+                projectRoot == repositoryProjectDirectory(project.id)
+        ) {
+            "Project directory does not match the selected project."
+        }
+
+        val downloadUrl =
+            "${repositoryUrl(owner, repository)}/actions/artifacts/" +
+                "$artifactId/zip"
+
+        val parent = File(
+            projectRoot,
+            "build/andro-artifacts"
+        ).canonicalFile
+
+        require(
+            parent.path.startsWith(projectRoot.path + File.separator)
+        ) {
+            "Artifact destination escapes the project directory."
+        }
+
+        check(parent.exists() || parent.mkdirs()) {
+            "Could not create artifact directory."
+        }
+
+        val staging = File(
+            parent,
+            ".artifact-$artifactId-${System.nanoTime()}.tmp"
+        )
+
+        val destination = File(
+            parent,
+            "artifact-$artifactId"
+        )
+
+        check(!destination.exists()) {
+            "This artifact has already been downloaded. Remove its folder before downloading it again."
+        }
+
+        check(staging.mkdirs()) {
+            "Could not create artifact staging directory."
+        }
+
+        try {
+            client.newCall(request(downloadUrl))
+                .execute()
+                .use { response ->
+
+                    if (!response.isSuccessful) {
+                        val detail = response.body
+                            ?.string()
+                            .orEmpty()
+
+                        throw IOException(
+                            "Artifact download failed: HTTP ${response.code}. $detail"
+                        )
+                    }
+
+                    val body = response.body
+                        ?: throw IOException(
+                            "GitHub returned an empty artifact response."
+                        )
+
+                    val contentLength = body.contentLength()
+
+                    if (
+                        contentLength > MAX_ARTIFACT_DOWNLOAD_BYTES
+                    ) {
+                        throw IOException(
+                            "Artifact archive exceeds the 500 MB download limit."
+                        )
+                    }
+
+                    val limitedStream = SizeLimitedInputStream(
+                        body.byteStream(),
+                        MAX_ARTIFACT_DOWNLOAD_BYTES
+                    )
+
+                    extractArchive(
+                        limitedStream,
+                        staging
+                    )
+                }
+
+            check(staging.renameTo(destination)) {
+                "Could not move the extracted artifact into its final directory."
+            }
+
+            return destination
+        } catch (error: Exception) {
+            staging.deleteRecursively()
+            throw error
+        }
+    }
+
+    private fun repositoryProjectDirectory(
+        projectId: String
+    ): File {
+        // The project root is verified through the repository
+        // instance's canonical project directory.
+        return repositoryDirectory(projectId)
+    }
+
+    private fun repositoryDirectory(
+        projectId: String
+    ): File {
+        return projectRepository.projectDir(projectId).canonicalFile
+    }
+
+    private val projectRepository: ProjectRepository
+        get() = throw UnsupportedOperationException(
+            "ProjectRepository must be supplied to downloadArtifact."
+        )
+
+    private fun extractArchive(
+        input: java.io.InputStream,
+        destination: File
+    ) {
+        var entryCount = 0
+        var extractedBytes = 0L
+
+        ZipInputStream(
+            BufferedInputStream(input)
+        ).use { zip ->
+
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                entryCount++
+
+                if (entryCount > MAX_ARCHIVE_ENTRIES) {
+                    throw IOException(
+                        "Artifact archive contains too many entries."
+                    )
+                }
+
+                val entryName = entry.name.replace('\\', '/')
+
+                if (
+                    entryName.isBlank() ||
+                    entryName.startsWith("/") ||
+                    entryName.split("/").any {
+                        it == ".." || it == "."
+                    }
+                ) {
+                    throw IOException(
+                        "Artifact contains an unsafe file path."
+                    )
+                }
+
+                val target = File(
+                    destination,
+                    entryName
+                ).canonicalFile
+
+                if (
+                    target.path != destination.canonicalPath &&
+                    !target.path.startsWith(
+                        destination.canonicalPath + File.separator
+                    )
+                ) {
+                    throw IOException(
+                        "Artifact entry escapes the extraction directory."
+                    )
+                }
+
+                if (entry.isDirectory) {
+                    check(target.exists() || target.mkdirs()) {
+                        "Could not create artifact directory."
+                    }
+                } else {
+                    val parent = target.parentFile
+                        ?: throw IOException(
+                            "Invalid artifact file path."
+                        )
+
+                    check(parent.exists() || parent.mkdirs()) {
+                        "Could not create artifact parent directory."
+                    }
+
+                    if (target.exists()) {
+                        throw IOException(
+                            "Artifact contains duplicate file paths."
+                        )
+                    }
+
+                    target.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(16 * 1024)
+
+                        while (true) {
+                            val count = zip.read(buffer)
+
+                            if (count == -1) break
+
+                            extractedBytes += count
+
+                            if (
+                                extractedBytes >
+                                MAX_EXTRACTED_BYTES
+                            ) {
+                                throw IOException(
+                                    "Extracted artifact exceeds the 500 MB limit."
+                                )
+                            }
+
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+
+                zip.closeEntry()
+            }
+        }
+
+        if (entryCount == 0) {
+            throw IOException(
+                "The downloaded artifact archive is empty."
+            )
+        }
+    }
+
+    private class SizeLimitedInputStream(
+        input: java.io.InputStream,
+        private val limit: Long
+    ) : FilterInputStream(input) {
+
+        private var total = 0L
+
+        override fun read(): Int {
+            val value = super.read()
+
+            if (value != -1) {
+                total++
+
+                if (total > limit) {
+                    throw IOException(
+                        "Artifact download exceeds the 500 MB limit."
+                    )
+                }
+            }
+
+            return value
+        }
+
+        override fun read(
+            buffer: ByteArray,
+            offset: Int,
+            length: Int
+        ): Int {
+            val count = super.read(buffer, offset, length)
+
+            if (count > 0) {
+                total += count
+
+                if (total > limit) {
+                    throw IOException(
+                        "Artifact download exceeds the 500 MB limit."
+                    )
+                }
+            }
+
+            return count
+        }
+    }
+
     fun cancelWorkflowRun(
         owner: String,
         repository: String,
@@ -335,6 +638,6 @@ class GitHubWorkflowManager(
         return java.net.URLEncoder.encode(
             value,
             Charsets.UTF_8.name()
-        )
+        ).replace("+", "%20")
     }
 }
