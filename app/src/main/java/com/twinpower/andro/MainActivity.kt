@@ -18,10 +18,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -30,7 +30,11 @@ class MainActivity : ComponentActivity() {
         val mcp = AndroMcpServer(repository, builds)
 
         setContent {
-            AndroApp(repository, builds, mcp)
+            AndroApp(
+                repository = repository,
+                builds = builds,
+                mcp = mcp
+            )
         }
     }
 }
@@ -47,45 +51,74 @@ private fun AndroApp(
     var projects by remember {
         mutableStateOf(repository.listProjects())
     }
+
     var selected by remember {
         mutableStateOf<ProjectInfo?>(null)
     }
+
     var files by remember {
         mutableStateOf<List<String>>(emptyList())
     }
-    var buildState by remember {
-        mutableStateOf<BuildSnapshot?>(null)
-    }
+
     var mcpRunning by remember {
         mutableStateOf(false)
     }
+
     var message by remember {
         mutableStateOf("Create or import a project to begin.")
     }
-    var task by remember {
-        mutableStateOf("assembleDebug")
-    }
+
     var busy by remember {
         mutableStateOf(false)
     }
+
     var screen by remember {
         mutableStateOf("Workspace")
     }
 
-    var showCreateProject by remember { mutableStateOf(false) }
-    var showCreateFile by remember { mutableStateOf(false) }
-    var showCreateDirectory by remember { mutableStateOf(false) }
-    var showEditor by remember { mutableStateOf(false) }
+    var showCreateProject by remember {
+        mutableStateOf(false)
+    }
 
-    var projectName by remember { mutableStateOf("") }
-    var newFilePath by remember { mutableStateOf("") }
-    var newDirectoryPath by remember { mutableStateOf("") }
-    var editingPath by remember { mutableStateOf("") }
-    var editorContent by remember { mutableStateOf("") }
-    var editorDirty by remember { mutableStateOf(false) }
+    var showCreateFile by remember {
+        mutableStateOf(false)
+    }
+
+    var showCreateDirectory by remember {
+        mutableStateOf(false)
+    }
+
+    var showEditor by remember {
+        mutableStateOf(false)
+    }
+
+    var projectName by remember {
+        mutableStateOf("")
+    }
+
+    var newFilePath by remember {
+        mutableStateOf("")
+    }
+
+    var newDirectoryPath by remember {
+        mutableStateOf("")
+    }
+
+    var editingPath by remember {
+        mutableStateOf("")
+    }
+
+    var editorContent by remember {
+        mutableStateOf("")
+    }
+
+    var editorDirty by remember {
+        mutableStateOf(false)
+    }
 
     fun refreshProjects() {
         projects = repository.listProjects()
+
         selected = selected?.let { current ->
             projects.firstOrNull { it.id == current.id }
         }
@@ -96,25 +129,6 @@ private fun AndroApp(
             emptyList()
         } else {
             repository.listFiles(projectId)
-        }
-    }
-
-    LaunchedEffect(buildState?.id) {
-        val id = buildState?.id ?: return@LaunchedEffect
-
-        while (true) {
-            val latest = builds.get(id) ?: break
-            buildState = latest
-
-            if (
-                latest.status == "succeeded" ||
-                latest.status == "failed"
-            ) {
-                message = "Build ${latest.status}."
-                break
-            }
-
-            delay(1000)
         }
     }
 
@@ -141,26 +155,6 @@ private fun AndroApp(
         }
     }
 
-    val toolchainPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            scope.launch {
-                busy = true
-
-                runCatching {
-                    repository.importToolchain(uri)
-                }.onSuccess {
-                    message = "Toolchain imported. Check runtime status."
-                }.onFailure {
-                    message = "Toolchain import failed: ${it.message}"
-                }
-
-                busy = false
-            }
-        }
-    }
-
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Color(0xFF9BB4FF),
@@ -180,6 +174,7 @@ private fun AndroApp(
                                 fontWeight = FontWeight.Black,
                                 letterSpacing = 3.sp
                             )
+
                             Text(
                                 "Android development environment",
                                 style = MaterialTheme.typography.labelSmall
@@ -196,6 +191,7 @@ private fun AndroApp(
                         "Builds",
                         "Connections"
                     ).forEach { destination ->
+
                         NavigationBarItem(
                             selected = screen == destination,
                             onClick = {
@@ -218,7 +214,9 @@ private fun AndroApp(
                                     }
                                 )
                             },
-                            label = { Text(destination) }
+                            label = {
+                                Text(destination)
+                            }
                         )
                     }
                 }
@@ -242,7 +240,7 @@ private fun AndroApp(
                                 shape = RoundedCornerShape(22.dp)
                             ) {
                                 Column(
-                                    Modifier
+                                    modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(18.dp),
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -254,7 +252,7 @@ private fun AndroApp(
                                     )
 
                                     Text(
-                                        "Build Android projects on your device",
+                                        "Your Android development workspace",
                                         style = MaterialTheme.typography.headlineSmall,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -289,47 +287,27 @@ private fun AndroApp(
                         }
 
                         item {
-                            val ready = repository.toolchainStatus()
-
                             Card {
                                 Column(
-                                    Modifier
+                                    modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(16.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        "BUILD ENVIRONMENT",
+                                        "BUILD SYSTEM",
                                         fontWeight = FontWeight.Bold
                                     )
 
                                     Text(
-                                        if (ready.ready) {
-                                            "Runtime detected"
-                                        } else {
-                                            "Runtime not ready"
-                                        },
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (ready.ready) {
-                                            MaterialTheme.colorScheme.secondary
-                                        } else {
-                                            MaterialTheme.colorScheme.error
-                                        }
+                                        "GitHub Actions",
+                                        color = MaterialTheme.colorScheme.secondary,
+                                        fontWeight = FontWeight.SemiBold
                                     )
 
                                     Text(
-                                        ready.message,
-                                        style = MaterialTheme.typography.bodySmall
+                                        "Andro uses GitHub Actions for remote Android builds. Your project files remain available in the local workspace."
                                     )
-
-                                    OutlinedButton(
-                                        onClick = {
-                                            toolchainPicker.launch(null)
-                                        },
-                                        enabled = !busy
-                                    ) {
-                                        Text("Import toolchain")
-                                    }
                                 }
                             }
                         }
@@ -355,6 +333,7 @@ private fun AndroApp(
                             projects,
                             key = { it.id }
                         ) { project ->
+
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -373,7 +352,7 @@ private fun AndroApp(
                                 )
                             ) {
                                 Column(
-                                    Modifier.padding(14.dp),
+                                    modifier = Modifier.padding(14.dp),
                                     verticalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     Text(
@@ -390,7 +369,7 @@ private fun AndroApp(
                                         if (project.hasGradleWrapper) {
                                             "Gradle wrapper detected"
                                         } else {
-                                            "No Gradle wrapper"
+                                            "No Gradle wrapper detected"
                                         },
                                         style = MaterialTheme.typography.labelSmall
                                     )
@@ -402,7 +381,7 @@ private fun AndroApp(
                             item {
                                 Card {
                                     Column(
-                                        Modifier
+                                        modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(16.dp),
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -433,7 +412,7 @@ private fun AndroApp(
                                             },
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            Text("Open build manager")
+                                            Text("Open remote build manager")
                                         }
                                     }
                                 }
@@ -498,6 +477,7 @@ private fun AndroApp(
                                 files,
                                 key = { it }
                             ) { path ->
+
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -508,9 +488,9 @@ private fun AndroApp(
                                                         selected!!.id,
                                                         path
                                                     )
-                                                }.onSuccess {
+                                                }.onSuccess { content ->
                                                     editingPath = path
-                                                    editorContent = it
+                                                    editorContent = content
                                                     editorDirty = false
                                                     showEditor = true
                                                 }.onFailure {
@@ -521,7 +501,7 @@ private fun AndroApp(
                                         }
                                 ) {
                                     Row(
-                                        Modifier
+                                        modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(14.dp),
                                         verticalAlignment = Alignment.CenterVertically
@@ -531,6 +511,7 @@ private fun AndroApp(
                                             modifier = Modifier.weight(1f),
                                             style = MaterialTheme.typography.bodyMedium
                                         )
+
                                         Text(
                                             "Open",
                                             color = MaterialTheme.colorScheme.secondary
@@ -538,6 +519,7 @@ private fun AndroApp(
                                     }
                                 }
                             }
+
                         } else {
                             item {
                                 Text("Create or import a project in Workspace first.")
@@ -549,128 +531,35 @@ private fun AndroApp(
 
                         item {
                             Text(
-                                "LOCAL BUILD MANAGER",
+                                "REMOTE BUILD MANAGER",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold
                             )
                         }
 
-                        if (selected == null) {
-                            item {
-                                Text("Select a project in Workspace before starting a build.")
-                            }
-                        } else {
-                            item {
-                                Card {
-                                    Column(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .padding(16.dp),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Text(
-                                            selected!!.name,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                        item {
+                            Card {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        selected?.name
+                                            ?: "No project selected",
+                                        fontWeight = FontWeight.Bold
+                                    )
 
-                                        OutlinedTextField(
-                                            value = task,
-                                            onValueChange = { task = it },
-                                            label = { Text("Gradle task") },
-                                            singleLine = true,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
+                                    Text(
+                                        "Builds are executed by GitHub Actions. The remote build coordinator and artifact manager will be connected here."
+                                    )
 
-                                        Button(
-                                            onClick = {
-                                                scope.launch {
-                                                    busy = true
-
-                                                    runCatching {
-                                                        builds.start(
-                                                            selected!!,
-                                                            task
-                                                        )
-                                                    }.onSuccess {
-                                                        buildState = it
-                                                        message = "Build queued."
-                                                    }.onFailure {
-                                                        message =
-                                                            "Build could not start: ${it.message}"
-                                                    }
-
-                                                    busy = false
-                                                }
-                                            },
-                                            enabled = !busy &&
-                                                repository.toolchainStatus().ready,
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Text("Start local build")
-                                        }
-                                    }
+                                    Text(
+                                        "Select a project and connect its GitHub repository in Connections.",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
                                 }
-                            }
-                        }
-
-                        // Correct LazyColumn structure:
-                        // each branch adds its own item. No nested item() calls.
-                        if (buildState != null) {
-                            item {
-                                val state = buildState!!
-
-                                Card {
-                                    Column(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .padding(16.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Text(
-                                            "BUILD ${state.status.uppercase()}",
-                                            fontWeight = FontWeight.Bold,
-                                            color = when (state.status) {
-                                                "succeeded" ->
-                                                    MaterialTheme.colorScheme.secondary
-                                                "failed" ->
-                                                    MaterialTheme.colorScheme.error
-                                                else ->
-                                                    MaterialTheme.colorScheme.primary
-                                            }
-                                        )
-
-                                        Text("Task: ${state.task}")
-                                        Text("Build ID: ${state.id}")
-
-                                        state.exitCode?.let {
-                                            Text("Exit code: $it")
-                                        }
-
-                                        HorizontalDivider()
-
-                                        Text(
-                                            "BUILD LOG",
-                                            fontWeight = FontWeight.Bold
-                                        )
-
-                                        Text(
-                                            state.logs.takeLast(100)
-                                                .joinToString("\n"),
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-
-                                        state.artifactPaths.forEach { artifact ->
-                                            Text(
-                                                "Artifact: $artifact",
-                                                style = MaterialTheme.typography.labelSmall
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            item {
-                                Text("No build has been started in this session.")
                             }
                         }
                     }
@@ -688,7 +577,7 @@ private fun AndroApp(
                         item {
                             Card {
                                 Column(
-                                    Modifier
+                                    modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(16.dp),
                                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -748,41 +637,18 @@ private fun AndroApp(
                                 }
                             }
                         }
+
                         item {
                             CloudflareMcpConnections(
                                 mcp = mcp,
-                                onLocalServerStarted = { mcpRunning = true }
+                                onLocalServerStarted = {
+                                    mcpRunning = true
+                                }
                             )
                         }
+
                         item {
                             GitHubConnections()
-                        }
-
-                        item {
-                            GitHubRemoteBuilds(repository)
-                        }
-                        
-
-            
-
-                        
-                        item {
-                            Card {
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        "ANDRO-SERVER",
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                    Text(
-                                        "Remote build-server connection is not implemented yet."
-                                    )
-                                }
-                            }
                         }
                     }
                 }
@@ -808,8 +674,12 @@ private fun AndroApp(
                 text = {
                     OutlinedTextField(
                         value = projectName,
-                        onValueChange = { projectName = it },
-                        label = { Text("Project name") },
+                        onValueChange = {
+                            projectName = it
+                        },
+                        label = {
+                            Text("Project name")
+                        },
                         singleLine = true
                     )
                 },
@@ -865,8 +735,12 @@ private fun AndroApp(
                 text = {
                     OutlinedTextField(
                         value = newFilePath,
-                        onValueChange = { newFilePath = it },
-                        label = { Text("File path") },
+                        onValueChange = {
+                            newFilePath = it
+                        },
+                        label = {
+                            Text("File path")
+                        },
                         placeholder = {
                             Text("app/src/main/java/MainActivity.kt")
                         },
@@ -920,8 +794,12 @@ private fun AndroApp(
                 text = {
                     OutlinedTextField(
                         value = newDirectoryPath,
-                        onValueChange = { newDirectoryPath = it },
-                        label = { Text("Folder path") },
+                        onValueChange = {
+                            newDirectoryPath = it
+                        },
+                        label = {
+                            Text("Folder path")
+                        },
                         placeholder = {
                             Text("app/src/main/java")
                         },
@@ -982,7 +860,10 @@ private fun AndroApp(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 250.dp, max = 480.dp),
+                            .heightIn(
+                                min = 250.dp,
+                                max = 480.dp
+                            ),
                         textStyle = MaterialTheme.typography.bodySmall,
                         placeholder = {
                             Text("Edit source code...")
@@ -1004,8 +885,7 @@ private fun AndroApp(
                                 message = "Saved $editingPath."
                                 showEditor = false
                             }.onFailure {
-                                message =
-                                    "Save failed: ${it.message}"
+                                message = "Save failed: ${it.message}"
                             }
                         },
                         enabled = editorDirty && selected != null
