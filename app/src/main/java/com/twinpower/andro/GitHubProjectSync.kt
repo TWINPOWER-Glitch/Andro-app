@@ -1,14 +1,18 @@
+
 package com.twinpower.andro
 
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 data class GitHubSyncResult(
     val operation: String,
@@ -26,6 +30,16 @@ class GitHubProjectSync(
         private const val MAX_FILE_SIZE = 512 * 1024
         private const val MAX_FILES = 500
     }
+
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .build()
+
+    private val jsonMediaType =
+        "application/json; charset=utf-8".toMediaType()
 
     private fun token(): String =
         tokenProvider()?.trim()?.takeIf { it.isNotEmpty() }
@@ -51,7 +65,16 @@ class GitHubProjectSync(
         require(
             branch.isNotBlank() &&
                 branch.length <= 255 &&
-                !branch.contains('\n')
+                !branch.startsWith("/") &&
+                !branch.endsWith("/") &&
+                !branch.contains("..") &&
+                !branch.contains("//") &&
+                !branch.contains("@{") &&
+                branch.none {
+                    it.isWhitespace() ||
+                        it.isISOControl() ||
+                        it in setOf('~', '^', ':', '?', '*', '[', '\\')
+                }
         ) {
             "Invalid branch."
         }
@@ -62,76 +85,51 @@ class GitHubProjectSync(
         method: String = "GET",
         body: JSONObject? = null
     ): String {
-        val connection = URL("$API$path")
-            .openConnection() as HttpURLConnection
-
-        try {
-            connection.requestMethod = method
-            connection.connectTimeout = 20000
-            connection.readTimeout = 45000
-
-            connection.setRequestProperty(
+        val builder = Request.Builder()
+            .url("$API$path")
+            .header(
                 "Authorization",
                 "Bearer ${token()}"
             )
-
-            connection.setRequestProperty(
+            .header(
                 "Accept",
                 "application/vnd.github+json"
             )
-
-            connection.setRequestProperty(
+            .header(
                 "X-GitHub-Api-Version",
                 "2022-11-28"
             )
-
-            connection.setRequestProperty(
+            .header(
                 "User-Agent",
                 "Andro-Android-App"
             )
 
-            if (body != null) {
-                connection.doOutput = true
+        val requestBody = body?.toString()
+            ?.toRequestBody(jsonMediaType)
 
-                connection.setRequestProperty(
-                    "Content-Type",
-                    "application/json; charset=utf-8"
-                )
+        val request = builder
+            .method(method, requestBody)
+            .build()
 
-                connection.outputStream.use {
-                    it.write(
-                        body.toString()
-                            .toByteArray(Charsets.UTF_8)
-                    )
-                }
-            }
-
-            val status = connection.responseCode
-
-            val stream = if (status in 200..299) {
-                connection.inputStream
-            } else {
-                connection.errorStream
-            }
-
-            val response = stream
-                ?.bufferedReader()
-                ?.use { it.readText() }
+        httpClient.newCall(request).execute().use { response ->
+            val responseText = response.body
+                ?.string()
                 .orEmpty()
 
-            if (status !in 200..299) {
+            if (!response.isSuccessful) {
                 val detail = runCatching {
-                    JSONObject(response)
+                    JSONObject(responseText)
                         .optString("message")
-                        .ifBlank { response }
-                }.getOrDefault(response)
+                        .ifBlank { responseText }
+                }.getOrDefault(responseText)
 
-                throw GitHubApiException(status, detail)
+                throw GitHubApiException(
+                    response.code,
+                    detail
+                )
             }
 
-            return response
-        } finally {
-            connection.disconnect()
+            return responseText
         }
     }
 
@@ -165,7 +163,8 @@ class GitHubProjectSync(
 
     private fun validatePath(path: String) {
         require(
-            !path.startsWith("/") &&
+            path.isNotBlank() &&
+                !path.startsWith("/") &&
                 !path.contains('\\')
         ) {
             "Unsafe repository path: $path"
@@ -179,6 +178,10 @@ class GitHubProjectSync(
             }
         ) {
             "Unsafe repository path: $path"
+        }
+
+        require(path.length <= 240) {
+            "Repository path is too long: $path"
         }
     }
 
@@ -223,9 +226,7 @@ class GitHubProjectSync(
             ?: JSONArray()
 
         val eligible = (0 until tree.length())
-            .map {
-                tree.getJSONObject(it)
-            }
+            .map { tree.getJSONObject(it) }
             .filter {
                 it.optString("type") == "blob" &&
                     shouldSync(it.optString("path"))
@@ -330,6 +331,10 @@ class GitHubProjectSync(
             "A commit message is required."
         }
 
+        require(commitMessage.length <= 500) {
+            "Commit message is too long."
+        }
+
         val files = repository
             .listFiles(project.id)
             .filter(::shouldSync)
@@ -340,10 +345,36 @@ class GitHubProjectSync(
             )
         }
 
+        if (files.isEmpty()) {
+            throw IOException(
+                "There are no project files available to push."
+            )
+        }
+
         val root = repoPath(owner, repo)
+
+        // Read the current branch reference before creating a commit.
+        val reference = JSONObject(
+            api("$root/git/ref/heads/${encode(branch)}")
+        )
+
+        val parentCommitSha = reference
+            .getJSONObject("object")
+            .getString("sha")
+
+        val parentCommit = JSONObject(
+            api("$root/git/commits/$parentCommitSha")
+        )
+
+        val baseTreeSha = parentCommit
+            .getJSONObject("tree")
+            .getString("sha")
+
+        val treeEntries = JSONArray()
 
         var processed = 0
 
+        // Upload each project file as a Git blob.
         for (path in files) {
             validatePath(path)
 
@@ -358,56 +389,104 @@ class GitHubProjectSync(
                 )
             }
 
-            val encodedPath = path.split("/")
-                .joinToString("/") {
-                    encode(it)
-                }
+            val encodedContent = Base64.encodeToString(
+                bytes,
+                Base64.NO_WRAP
+            )
 
-            val existingSha = try {
-                JSONObject(
-                    api(
-                        "$root/contents/$encodedPath?ref=${encode(branch)}"
-                    )
+            val blobPayload = JSONObject()
+                .put("content", encodedContent)
+                .put("encoding", "base64")
+
+            val blob = JSONObject(
+                api(
+                    "$root/git/blobs",
+                    method = "POST",
+                    body = blobPayload
                 )
-                    .optString("sha")
-                    .takeIf { it.isNotBlank() }
-            } catch (error: GitHubApiException) {
-                if (error.statusCode == 404) {
-                    null
-                } else {
-                    throw error
-                }
+            )
+
+            val blobSha = blob.optString("sha")
+
+            if (blobSha.isBlank()) {
+                throw IOException(
+                    "GitHub did not return a blob SHA for $path."
+                )
             }
 
-            val payload = JSONObject()
-                .put("message", commitMessage)
-                .put(
-                    "content",
-                    Base64.encodeToString(
-                        bytes,
-                        Base64.NO_WRAP
-                    )
-                )
-                .put("branch", branch)
-
-            if (existingSha != null) {
-                payload.put("sha", existingSha)
-            }
-
-            api(
-                "$root/contents/$encodedPath",
-                method = "PUT",
-                body = payload
+            treeEntries.put(
+                JSONObject()
+                    .put("path", path)
+                    .put("mode", if (path == "gradlew") "100755" else "100644")
+                    .put("type", "blob")
+                    .put("sha", blobSha)
             )
 
             processed++
         }
 
+        // Create one tree containing the complete project update.
+        val treePayload = JSONObject()
+            .put("base_tree", baseTreeSha)
+            .put("tree", treeEntries)
+
+        val createdTree = JSONObject(
+            api(
+                "$root/git/trees",
+                method = "POST",
+                body = treePayload
+            )
+        )
+
+        val newTreeSha = createdTree.optString("sha")
+
+        if (newTreeSha.isBlank()) {
+            throw IOException(
+                "GitHub did not return the new project tree SHA."
+            )
+        }
+
+        // Create one commit for the entire project update.
+        val parents = JSONArray().put(parentCommitSha)
+
+        val commitPayload = JSONObject()
+            .put("message", commitMessage)
+            .put("tree", newTreeSha)
+            .put("parents", parents)
+
+        val createdCommit = JSONObject(
+            api(
+                "$root/git/commits",
+                method = "POST",
+                body = commitPayload
+            )
+        )
+
+        val newCommitSha = createdCommit.optString("sha")
+
+        if (newCommitSha.isBlank()) {
+            throw IOException(
+                "GitHub did not return the new commit SHA."
+            )
+        }
+
+        // Move the branch only if it still points to the commit
+        // that was read at the beginning of this operation.
+        val updatePayload = JSONObject()
+            .put("sha", newCommitSha)
+            .put("force", false)
+
+        api(
+            "$root/git/refs/heads/${encode(branch)}",
+            method = "PATCH",
+            body = updatePayload
+        )
+
         GitHubSyncResult(
             operation = "push",
             filesProcessed = processed,
             branch = branch,
-            message = "Pushed $processed files to $owner/$repo ($branch)."
+            message = "Pushed $processed files in one commit to $owner/$repo ($branch). Commit: $newCommitSha"
         )
     }
 
