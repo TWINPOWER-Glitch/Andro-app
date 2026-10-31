@@ -1,3 +1,4 @@
+
 package com.twinpower.andro
 
 import android.os.Bundle
@@ -538,29 +539,9 @@ private fun AndroApp(
                         }
 
                         item {
-                            Card {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Text(
-                                        selected?.name
-                                            ?: "No project selected",
-                                        fontWeight = FontWeight.Bold
-                                    )
-
-                                    Text(
-                                        "Builds are executed by GitHub Actions. The remote build coordinator and artifact manager will be connected here."
-                                    )
-
-                                    Text(
-                                        "Select a project and connect its GitHub repository in Connections.",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                            }
+                            GitHubRemoteBuilds(
+                                repository = repository
+                            )
                         }
                     }
 
