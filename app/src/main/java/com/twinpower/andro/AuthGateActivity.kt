@@ -1,4 +1,3 @@
-
 package com.twinpower.andro
 
 import android.app.Activity
@@ -18,6 +17,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,6 +26,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,34 +50,62 @@ class AuthGateActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+
         setIntent(intent)
+
         AndroSupabase.client.handleDeeplinks(intent)
     }
 }
 
-@androidx.compose.runtime.Composable
+@Composable
 private fun AndroAuthScreen() {
-    val context = androidx.compose.ui.platform.LocalContext.current
+
+    val context = LocalContext.current
     val activity = context as? Activity
     val scope = rememberCoroutineScope()
 
-    var loading by remember { mutableStateOf(true) }
-    var signingIn by remember { mutableStateOf(false) }
+    var loading by remember {
+        mutableStateOf(true)
+    }
+
+    var signingIn by remember {
+        mutableStateOf(false)
+    }
+
+    var authenticated by remember {
+        mutableStateOf(false)
+    }
+
     var message by remember {
         mutableStateOf("Checking your Andro account...")
     }
 
-    var navigated by remember { mutableStateOf(false) }
+    var navigated by remember {
+        mutableStateOf(false)
+    }
 
     LaunchedEffect(Unit) {
+
         AndroSupabase.client.auth.sessionStatus.collect { status ->
+
             when (status) {
+
+                SessionStatus.Initializing -> {
+                    loading = true
+                    signingIn = false
+                    message = "Restoring your saved account session..."
+                }
+
                 is SessionStatus.Authenticated -> {
+
                     loading = false
                     signingIn = false
+                    authenticated = true
+
                     message = "Account authenticated."
 
                     if (!navigated) {
+
                         navigated = true
 
                         context.startActivity(
@@ -94,22 +123,34 @@ private fun AndroAuthScreen() {
                     }
                 }
 
-                else -> {
-                    loading = false
+                is SessionStatus.NotAuthenticated -> {
 
-                    if (!signingIn) {
-                        message = "Sign in to your Andro account."
-                    }
+                    loading = false
+                    authenticated = false
+                    signingIn = false
+
+                    message = "Sign in to your Andro account."
+                }
+
+                is SessionStatus.RefreshFailure -> {
+
+                    loading = true
+                    authenticated = false
+
+                    message =
+                        "Your saved session could not currently be refreshed. Check your internet connection while Andro retries."
                 }
             }
         }
     }
 
     MaterialTheme {
+
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
         ) {
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -117,6 +158,7 @@ private fun AndroAuthScreen() {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
+
                 Text(
                     "ANDRO",
                     fontSize = 34.sp,
@@ -124,14 +166,18 @@ private fun AndroAuthScreen() {
                     letterSpacing = 5.sp
                 )
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(
+                    Modifier.height(12.dp)
+                )
 
                 Text(
                     "Your Android development environment",
                     style = MaterialTheme.typography.bodyMedium
                 )
 
-                Spacer(Modifier.height(36.dp))
+                Spacer(
+                    Modifier.height(36.dp)
+                )
 
                 Text(
                     "CUSTOMER ACCOUNT",
@@ -139,30 +185,44 @@ private fun AndroAuthScreen() {
                     color = MaterialTheme.colorScheme.primary
                 )
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(
+                    Modifier.height(12.dp)
+                )
 
                 Text(
                     "Sign in with GitHub to establish your personal Andro identity. Your devices and MCP permissions will belong to this account.",
                     style = MaterialTheme.typography.bodyMedium
                 )
 
-                Spacer(Modifier.height(24.dp))
+                Spacer(
+                    Modifier.height(24.dp)
+                )
 
-                if (loading) {
+                if (loading || authenticated) {
+
                     CircularProgressIndicator()
+
                 } else {
+
                     Button(
                         onClick = {
+
                             scope.launch {
+
                                 signingIn = true
+
                                 message = "Opening GitHub sign-in..."
 
                                 runCatching {
+
                                     AndroSupabase.client.auth.signInWith(
                                         Github
                                     )
+
                                 }.onFailure { error ->
+
                                     signingIn = false
+
                                     message =
                                         error.message
                                             ?: "GitHub sign-in could not start."
@@ -172,6 +232,7 @@ private fun AndroAuthScreen() {
                         enabled = !signingIn && !navigated,
                         modifier = Modifier.fillMaxWidth()
                     ) {
+
                         Text(
                             if (signingIn) {
                                 "Connecting..."
@@ -182,14 +243,18 @@ private fun AndroAuthScreen() {
                     }
                 }
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(
+                    Modifier.height(20.dp)
+                )
 
                 Text(
                     message,
                     style = MaterialTheme.typography.bodySmall
                 )
 
-                Spacer(Modifier.height(32.dp))
+                Spacer(
+                    Modifier.height(32.dp)
+                )
 
                 Text(
                     "Your GitHub account authenticates you to Andro. It does not give Andro unrestricted control of your GitHub account.",
