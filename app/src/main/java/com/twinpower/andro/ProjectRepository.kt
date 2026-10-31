@@ -1,6 +1,7 @@
 package com.twinpower.andro
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
@@ -32,8 +33,7 @@ class ProjectRepository(private val context: Context) {
     fun listProjects(): List<ProjectInfo> =
         projectsDir.listFiles()
             ?.filter {
-                it.isDirectory &&
-                    File(it, ".andro-project.json").exists()
+                it.isDirectory && File(it, ".andro-project.json").exists()
             }
             ?.mapNotNull { readProjectInfo(it) }
             ?.sortedBy { it.name.lowercase() }
@@ -58,27 +58,34 @@ class ProjectRepository(private val context: Context) {
                 "Could not create project directory."
             }
 
-            val metadata = JSONObject()
-                .put("id", id)
-                .put("name", safeName)
-                .put("createdAt", System.currentTimeMillis())
+            try {
+                AndroidProjectTemplate.generate(destination, safeName)
 
-            File(destination, ".andro-project.json")
-                .writeText(metadata.toString())
+                val metadata = JSONObject()
+                    .put("id", id)
+                    .put("name", safeName)
+                    .put("createdAt", System.currentTimeMillis())
 
-            ProjectInfo(
-                id = id,
-                name = safeName,
-                rootPath = destination.absolutePath,
-                hasGradleWrapper = false
-            )
+                File(destination, ".andro-project.json")
+                    .writeText(metadata.toString(), Charsets.UTF_8)
+
+                ProjectInfo(
+                    id = id,
+                    name = safeName,
+                    rootPath = destination.absolutePath,
+                    hasGradleWrapper = false
+                )
+            } catch (error: Exception) {
+                destination.deleteRecursively()
+                throw error
+            }
         }
 
     suspend fun importProject(treeUri: Uri): ProjectInfo =
         withContext(Dispatchers.IO) {
             context.contentResolver.takePersistableUriPermission(
                 treeUri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
 
             val source = DocumentFile.fromTreeUri(context, treeUri)
@@ -89,116 +96,166 @@ class ProjectRepository(private val context: Context) {
                 ?.takeIf { it.isNotBlank() }
                 ?: "Android project"
 
-            val destination = File(projectsDir, id).apply {
-                mkdirs()
+            val destination = File(projectsDir, id)
+
+            check(destination.mkdirs()) {
+                "Could not create project directory."
             }
 
-            copyTree(source, destination)
+            try {
+                copyTree(source, destination)
 
-            val metadata = JSONObject()
-                .put("id", id)
-                .put("name", safeName)
-                .put("importedAt", System.currentTimeMillis())
+                val metadata = JSONObject()
+                    .put("id", id)
+                    .put("name", safeName)
+                    .put("importedAt", System.currentTimeMillis())
 
-            File(destination, ".andro-project.json")
-                .writeText(metadata.toString())
+                File(destination, ".andro-project.json")
+                    .writeText(metadata.toString(), Charsets.UTF_8)
 
-            ProjectInfo(
-                id,
-                safeName,
-                destination.absolutePath,
-                File(destination, "gradlew").exists()
-            )
+                ProjectInfo(
+                    id,
+                    safeName,
+                    destination.absolutePath,
+                    File(destination, "gradlew").exists()
+                )
+            } catch (error: Exception) {
+                destination.deleteRecursively()
+                throw error
+            }
         }
 
     suspend fun importToolchain(treeUri: Uri) =
         withContext(Dispatchers.IO) {
             context.contentResolver.takePersistableUriPermission(
                 treeUri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
 
             val source = DocumentFile.fromTreeUri(context, treeUri)
                 ?: error("Could not open selected toolchain directory.")
 
-            val staging = File(
-                context.filesDir,
-                "toolchain-import"
-            ).apply {
-                deleteRecursively()
-                mkdirs()
-            }
-
-            copyTree(source, staging)
-
-            val root = when {
-                File(staging, "bin/bash").exists() -> staging
-                File(staging, "usr/bin/bash").exists() ->
-                    File(staging, "usr")
-                else -> error(
-                    "Toolchain must contain bin/bash or usr/bin/bash."
-                )
-            }
-
-            val finalDir = File(context.filesDir, "toolchain")
-
-            finalDir.deleteRecursively()
-            root.copyRecursively(finalDir, overwrite = true)
-
-            finalDir.walkTopDown()
-                .filter {
-                    it.isFile &&
-                        it.name in setOf(
-                            "bash",
-                            "java",
-                            "gradle",
-                            "aapt2"
-                        )
-                }
-                .forEach {
-                    it.setExecutable(true, true)
-                }
+            val staging = File(context.filesDir, "toolchain-import")
+            val candidate = File(context.filesDir, "toolchain-candidate")
+            val backup = File(context.filesDir, "toolchain-backup")
 
             staging.deleteRecursively()
+            candidate.deleteRecursively()
+            backup.deleteRecursively()
+
+            check(staging.mkdirs()) {
+                "Could not create toolchain staging directory."
+            }
+
+            try {
+                copyTree(source, staging)
+
+                val sourceRoot = when {
+                    File(staging, "bin/bash").isFile -> staging
+
+                    File(staging, "usr/bin/bash").isFile ->
+                        File(staging, "usr")
+
+                    else -> error(
+                        "Toolchain must contain bin/bash or usr/bin/bash."
+                    )
+                }
+
+                check(
+                    sourceRoot.copyRecursively(
+                        candidate,
+                        overwrite = true
+                    )
+                ) {
+                    "Could not stage the imported toolchain."
+                }
+
+                candidate.walkTopDown()
+                    .filter {
+                        it.isFile &&
+                            it.name in setOf(
+                                "bash",
+                                "java",
+                                "gradle",
+                                "aapt2"
+                            )
+                    }
+                    .forEach {
+                        it.setExecutable(true, true)
+                    }
+
+                val status = inspectToolchain(candidate)
+
+                check(status.ready) {
+                    status.message
+                }
+
+                val current = toolchainDir
+
+                if (current.exists()) {
+                    check(current.renameTo(backup)) {
+                        "Could not preserve the existing toolchain."
+                    }
+                }
+
+                if (!candidate.renameTo(current)) {
+                    if (backup.exists()) {
+                        backup.renameTo(current)
+                    }
+
+                    error("Could not activate the imported toolchain.")
+                }
+
+                backup.deleteRecursively()
+            } finally {
+                staging.deleteRecursively()
+                candidate.deleteRecursively()
+
+                if (!toolchainDir.exists() && backup.exists()) {
+                    backup.renameTo(toolchainDir)
+                }
+            }
 
             val status = toolchainStatus()
-            check(status.ready) { status.message }
+
+            check(status.ready) {
+                status.message
+            }
         }
 
-    fun toolchainStatus(): ToolchainStatus {
-        val bash = File(toolchainDir, "bin/bash")
-        val java = File(toolchainDir, "bin/java")
-        val gradle = File(toolchainDir, "bin/gradle")
-        val sdk = File(toolchainDir, "android-sdk")
+    fun toolchainStatus(): ToolchainStatus =
+        inspectToolchain(toolchainDir)
 
-        val platform =
-            sdk.listFiles()?.any {
-                it.name.startsWith("platforms")
-            } == true ||
-                File(sdk, "platforms")
-                    .listFiles()
-                    ?.isNotEmpty() == true
+    private fun inspectToolchain(root: File): ToolchainStatus {
+        val bash = File(root, "bin/bash")
+        val java = File(root, "bin/java")
+        val gradle = File(root, "bin/gradle")
+        val sdk = File(root, "android-sdk")
+        val platforms = File(sdk, "platforms")
+
+        val hasPlatform =
+            platforms.listFiles()?.any { it.isDirectory } == true
 
         return when {
-            !bash.exists() ->
+            !bash.isFile ->
                 ToolchainStatus(
                     false,
                     "Missing toolchain/bin/bash."
                 )
 
-            !java.exists() ->
+            !java.isFile ->
                 ToolchainStatus(
                     false,
                     "Missing toolchain/bin/java."
                 )
 
-            !gradle.exists() ->
+            !gradle.isFile ->
                 ToolchainStatus(
                     false,
                     "Missing toolchain/bin/gradle."
                 )
 
-            !platform ->
+            !hasPlatform ->
                 ToolchainStatus(
                     false,
                     "Android SDK platforms are missing."
@@ -207,7 +264,7 @@ class ProjectRepository(private val context: Context) {
             else ->
                 ToolchainStatus(
                     true,
-                    "Bash, Java, Gradle and Android SDK detected. Runtime compatibility still needs verification."
+                    "Bash, Java, Gradle and Android SDK platform files detected. Runtime execution still needs verification."
                 )
         }
     }
@@ -241,7 +298,7 @@ class ProjectRepository(private val context: Context) {
                 it.isFile &&
                     it.name != ".andro-project.json"
             }
-            .take(500)
+            .take(501)
             .map {
                 it.relativeTo(root).invariantSeparatorsPath
             }
@@ -253,6 +310,14 @@ class ProjectRepository(private val context: Context) {
         projectId: String,
         relativePath: String
     ): String {
+        val bytes = readFileBytes(projectId, relativePath)
+        return bytes.toString(Charsets.UTF_8)
+    }
+
+    fun readFileBytes(
+        projectId: String,
+        relativePath: String
+    ): ByteArray {
         val file = resolveProjectFile(projectId, relativePath)
 
         require(file.isFile) {
@@ -260,10 +325,10 @@ class ProjectRepository(private val context: Context) {
         }
 
         require(file.length() <= 512 * 1024) {
-            "File exceeds the 512 KB editor limit."
+            "File exceeds the 512 KB file limit."
         }
 
-        return file.readText(Charsets.UTF_8)
+        return file.readBytes()
     }
 
     fun writeFile(
@@ -271,20 +336,58 @@ class ProjectRepository(private val context: Context) {
         relativePath: String,
         content: String
     ) {
-        require(content.toByteArray(Charsets.UTF_8).size <= 512 * 1024) {
-            "File exceeds the 512 KB editor limit."
+        writeFileBytes(
+            projectId,
+            relativePath,
+            content.toByteArray(Charsets.UTF_8)
+        )
+    }
+
+    fun writeFileBytes(
+        projectId: String,
+        relativePath: String,
+        content: ByteArray
+    ) {
+        require(content.size <= 512 * 1024) {
+            "File exceeds the 512 KB file limit."
         }
 
-        val file = resolveProjectFile(projectId, relativePath)
-
-        require(
-            relativePath != ".andro-project.json"
-        ) {
+        require(relativePath != ".andro-project.json") {
             "Project metadata cannot be edited."
         }
 
-        file.parentFile?.mkdirs()
-        file.writeText(content, Charsets.UTF_8)
+        val file = resolveProjectFile(projectId, relativePath)
+        val parent = file.parentFile
+
+        check(
+            parent == null ||
+                parent.exists() ||
+                parent.mkdirs()
+        ) {
+            "Could not create parent directory."
+        }
+
+        val temporary = File(
+            parent,
+            ".${file.name}.${UUID.randomUUID()}.tmp"
+        )
+
+        try {
+            FileOutputStream(temporary).use { output ->
+                output.write(content)
+                output.fd.sync()
+            }
+
+            if (file.exists() && !file.delete()) {
+                error("Could not replace existing file.")
+            }
+
+            if (!temporary.renameTo(file)) {
+                error("Could not move the completed file into place.")
+            }
+        } finally {
+            temporary.delete()
+        }
     }
 
     fun createDirectory(
@@ -306,16 +409,14 @@ class ProjectRepository(private val context: Context) {
         relativePath: String,
         content: String = ""
     ) {
+        require(relativePath != ".andro-project.json") {
+            "Reserved file name."
+        }
+
         val file = resolveProjectFile(
             projectId,
             relativePath
         )
-
-        require(
-            relativePath != ".andro-project.json"
-        ) {
-            "Reserved file name."
-        }
 
         file.parentFile?.mkdirs()
 
@@ -330,9 +431,7 @@ class ProjectRepository(private val context: Context) {
         projectId: String,
         relativePath: String
     ) {
-        require(
-            relativePath != ".andro-project.json"
-        ) {
+        require(relativePath != ".andro-project.json") {
             "Project metadata cannot be deleted."
         }
 
@@ -366,9 +465,8 @@ class ProjectRepository(private val context: Context) {
             "Absolute paths are not allowed."
         }
 
-        val segments = relativePath
-            .replace('\\', '/')
-            .split('/')
+        val normalized = relativePath.replace('\\', '/')
+        val segments = normalized.split('/')
 
         require(
             segments.none {
@@ -379,7 +477,7 @@ class ProjectRepository(private val context: Context) {
         }
 
         val root = projectDir(projectId).canonicalFile
-        val file = File(root, relativePath).canonicalFile
+        val file = File(root, normalized).canonicalFile
 
         require(
             file.path.startsWith(root.path + File.separator)
@@ -393,7 +491,8 @@ class ProjectRepository(private val context: Context) {
     private fun readProjectInfo(dir: File): ProjectInfo? =
         runCatching {
             val json = JSONObject(
-                File(dir, ".andro-project.json").readText()
+                File(dir, ".andro-project.json")
+                    .readText(Charsets.UTF_8)
             )
 
             ProjectInfo(
@@ -409,18 +508,16 @@ class ProjectRepository(private val context: Context) {
         source: DocumentFile,
         destination: File
     ) {
-        destination.mkdirs()
+        check(
+            destination.exists() || destination.mkdirs()
+        ) {
+            "Could not create destination directory."
+        }
 
         source.listFiles().forEach { child ->
             val name = child.name ?: return@forEach
 
-            if (
-                name in setOf(
-                    ".git",
-                    ".gradle",
-                    "build"
-                )
-            ) {
+            if (name in setOf(".git", ".gradle", "build")) {
                 return@forEach
             }
 
@@ -436,6 +533,7 @@ class ProjectRepository(private val context: Context) {
                             input.copyTo(output)
                         }
                     }
+                    ?: error("Could not read imported file: $name")
             }
         }
     }
