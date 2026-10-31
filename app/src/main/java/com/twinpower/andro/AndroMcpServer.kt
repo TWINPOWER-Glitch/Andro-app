@@ -13,7 +13,8 @@ import org.json.JSONObject
 
 class AndroMcpServer(
     private val projects: ProjectRepository,
-    private val builds: BuildManager
+    private val builds: BuildManager,
+    private val githubBuilds: GitHubMcpBuildService
 ) {
 
     @Volatile
@@ -76,7 +77,7 @@ class AndroMcpServer(
                                     "serverInfo",
                                     JSONObject()
                                         .put("name", "andro-local")
-                                        .put("version", "0.3.0")
+                                        .put("version", "0.4.0")
                                 )
                         )
 
@@ -117,6 +118,7 @@ class AndroMcpServer(
                             .put("service", "andro-local-mcp")
                             .put("status", "ok")
                             .put("buildEngine", "github-actions")
+                            .put("mcpVersion", "0.4.0")
                             .toString(),
                         ContentType.Application.Json
                     )
@@ -171,15 +173,15 @@ class AndroMcpServer(
         list.put(
             tool(
                 "andro_build_project",
-                "Create a remote Android build request. Local Gradle execution is disabled. GitHub Actions dispatch must be configured through Andro's remote build manager.",
-                objectSchema("projectId", "task")
+                "Push the selected local project to its saved GitHub repository and dispatch its configured GitHub Actions workflow. Requires GitHub authentication and a saved repository configuration.",
+                buildProjectSchema()
             )
         )
 
         list.put(
             tool(
                 "andro_get_build_status",
-                "Get the local remote-build request record. This does not query live GitHub Actions run status.",
+                "Get a legacy local build request record. This does not query live GitHub Actions run status.",
                 objectSchema("buildId")
             )
         )
@@ -214,6 +216,33 @@ class AndroMcpServer(
             .put("type", "object")
             .put("properties", props)
             .put("required", JSONArray(required))
+    }
+
+    private fun buildProjectSchema(): JSONObject {
+        val properties = JSONObject()
+            .put(
+                "projectId",
+                JSONObject()
+                    .put("type", "string")
+                    .put(
+                        "description",
+                        "The ID of the local Andro project to build."
+                    )
+            )
+            .put(
+                "commitMessage",
+                JSONObject()
+                    .put("type", "string")
+                    .put(
+                        "description",
+                        "Optional Git commit message for the project synchronization."
+                    )
+            )
+
+        return JSONObject()
+            .put("type", "object")
+            .put("properties", properties)
+            .put("required", JSONArray().put("projectId"))
     }
 
     private suspend fun callTool(
@@ -286,36 +315,35 @@ class AndroMcpServer(
 
                 "andro_build_project" -> {
 
-                    val project = projects.getProject(
-                        args.getString("projectId")
-                    )
+                    val projectId = args.getString("projectId")
 
-                    val task = args.optString(
-                        "task",
-                        "assembleDebug"
+                    val commitMessage = args.optString(
+                        "commitMessage",
+                        "Build Android project with Andro"
                     ).ifBlank {
-                        "assembleDebug"
+                        "Build Android project with Andro"
                     }
 
-                    val snapshot = builds.start(
-                        project,
-                        task
+                    val dispatch = githubBuilds.buildProject(
+                        projectId = projectId,
+                        commitMessage = commitMessage
                     )
 
                     JSONObject()
-                        .put("buildId", snapshot.id)
-                        .put("projectId", snapshot.projectId)
-                        .put("status", snapshot.status)
-                        .put("task", snapshot.task)
+                        .put("projectId", projectId)
+                        .put("repository", dispatch.repository)
+                        .put("branch", dispatch.branch)
+                        .put("workflowId", dispatch.workflowId)
+                        .put("dispatchedAt", dispatch.dispatchedAt)
                         .put("executionEngine", "github-actions")
-                        .put("dispatched", false)
+                        .put("dispatched", true)
                         .put(
                             "message",
-                            "The request was recorded. No GitHub Actions workflow has been dispatched by this MCP tool."
+                            "Project synchronization completed and GitHub Actions workflow dispatch was submitted."
                         )
                         .put(
                             "nextStep",
-                            "Configure the GitHub repository and workflow in Andro's Remote Build Manager."
+                            "Query the GitHub Actions workflow runs to monitor the build and retrieve its APK artifact."
                         )
                 }
 
@@ -348,7 +376,7 @@ class AndroMcpServer(
                         )
                         .put(
                             "message",
-                            "This is the local request record, not live GitHub Actions status."
+                            "This is a legacy local request record, not live GitHub Actions status."
                         )
                 }
 
