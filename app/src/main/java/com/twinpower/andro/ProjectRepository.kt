@@ -19,6 +19,23 @@ data class ProjectInfo(
     val hasGradleWrapper: Boolean
 )
 
+/**
+ * Additional persistent information about a local project.
+ *
+ * GitHub repository credentials are deliberately excluded.
+ * Repository associations are managed by ProjectGitHubBindingStore.
+ */
+data class ProjectMetadata(
+    val projectId: String,
+    val source: String,
+    val createdAt: Long,
+    val importedAt: Long?,
+    val lastOpenedAt: Long?,
+    val lastSyncedAt: Long?,
+    val syncState: String,
+    val lastSyncMessage: String?
+)
+
 data class ToolchainStatus(
     val ready: Boolean,
     val message: String
@@ -30,6 +47,9 @@ class ProjectRepository(private val context: Context) {
         File(context.filesDir, "projects").apply { mkdirs() }
 
     val toolchainDir = File(context.filesDir, "toolchain")
+
+    private val githubBindingStore =
+        ProjectGitHubBindingStore(context.applicationContext)
 
     fun listProjects(): List<ProjectInfo> =
         projectsDir.listFiles()
@@ -62,10 +82,14 @@ class ProjectRepository(private val context: Context) {
             try {
                 AndroidProjectTemplate.generate(destination, safeName)
 
+                val createdAt = System.currentTimeMillis()
+
                 val metadata = JSONObject()
                     .put("id", id)
                     .put("name", safeName)
-                    .put("createdAt", System.currentTimeMillis())
+                    .put("createdAt", createdAt)
+                    .put("source", "local")
+                    .put("syncState", "not_synced")
 
                 File(destination, ".andro-project.json")
                     .writeText(metadata.toString(), Charsets.UTF_8)
@@ -110,10 +134,15 @@ class ProjectRepository(private val context: Context) {
             try {
                 copyTree(source, destination)
 
+                val importedAt = System.currentTimeMillis()
+
                 val metadata = JSONObject()
                     .put("id", id)
                     .put("name", safeName)
-                    .put("importedAt", System.currentTimeMillis())
+                    .put("importedAt", importedAt)
+                    .put("createdAt", importedAt)
+                    .put("source", "imported")
+                    .put("syncState", "not_synced")
 
                 File(destination, ".andro-project.json")
                     .writeText(metadata.toString(), Charsets.UTF_8)
@@ -129,6 +158,253 @@ class ProjectRepository(private val context: Context) {
                 throw error
             }
         }
+
+    /**
+     * Returns persisted metadata for a project.
+     *
+     * Older projects created before metadata tracking was introduced
+     * receive safe defaults without requiring migration.
+     */
+    fun getMetadata(projectId: String): ProjectMetadata {
+        val project = getProject(projectId)
+        val metadataFile = File(
+            projectDir(projectId),
+            ".andro-project.json"
+        )
+
+        val json = JSONObject(
+            metadataFile.readText(Charsets.UTF_8)
+        )
+
+        val createdAt = json.optLong(
+            "createdAt",
+            json.optLong("importedAt", 0L)
+        )
+
+        return ProjectMetadata(
+            projectId = project.id,
+            source = json.optString("source", "unknown"),
+            createdAt = createdAt,
+            importedAt = json.optLong("importedAt")
+                .takeIf { it > 0L },
+            lastOpenedAt = json.optLong("lastOpenedAt")
+                .takeIf { it > 0L },
+            lastSyncedAt = json.optLong("lastSyncedAt")
+                .takeIf { it > 0L },
+            syncState = json.optString(
+                "syncState",
+                "not_synced"
+            ),
+            lastSyncMessage = json.optString(
+                "lastSyncMessage",
+                ""
+            ).takeIf { it.isNotBlank() }
+        )
+    }
+
+    /**
+     * Records when a project is opened in the workspace.
+     */
+    fun markProjectOpened(projectId: String) {
+        updateMetadata(projectId) {
+            it.put(
+                "lastOpenedAt",
+                System.currentTimeMillis()
+            )
+        }
+    }
+
+    /**
+     * Marks the start of a GitHub synchronization operation.
+     */
+    fun markSyncStarted(projectId: String) {
+        updateMetadata(projectId) {
+            it.put("syncState", "syncing")
+                .put("lastSyncMessage", "Synchronization started.")
+        }
+    }
+
+    /**
+     * Records a successful synchronization.
+     */
+    fun markSyncSucceeded(
+        projectId: String,
+        message: String = "Project synchronized successfully."
+    ) {
+        updateMetadata(projectId) {
+            it.put("syncState", "synced")
+                .put(
+                    "lastSyncedAt",
+                    System.currentTimeMillis()
+                )
+                .put("lastSyncMessage", message)
+        }
+    }
+
+    /**
+     * Records a failed synchronization without deleting
+     * the previous successful synchronization timestamp.
+     */
+    fun markSyncFailed(
+        projectId: String,
+        message: String
+    ) {
+        require(message.length <= 1000) {
+            "Synchronization message is too long."
+        }
+
+        updateMetadata(projectId) {
+            it.put("syncState", "failed")
+                .put("lastSyncMessage", message)
+        }
+    }
+
+    /**
+     * Changes the local project display name.
+     * The project ID and directory remain unchanged.
+     */
+    fun updateProjectName(
+        projectId: String,
+        newName: String
+    ): ProjectInfo {
+        val safeName = newName.trim()
+
+        require(
+            safeName.matches(
+                Regex("[A-Za-z0-9][A-Za-z0-9 _.-]{0,49}")
+            )
+        ) {
+            "Use 1–50 letters, numbers, spaces, dots, underscores or hyphens."
+        }
+
+        updateMetadata(projectId) {
+            it.put("name", safeName)
+        }
+
+        return getProject(projectId)
+    }
+
+    /**
+     * Returns the saved GitHub repository association for a project.
+     *
+     * The project must exist in the local Andro workspace.
+     */
+    fun getGitHubBinding(
+        projectId: String
+    ): ProjectGitHubBinding? {
+        getProject(projectId)
+        return githubBindingStore.get(projectId)
+    }
+
+    /**
+     * Saves a GitHub repository association for a local project.
+     *
+     * Access tokens are not accepted or stored by this method.
+     */
+    fun saveGitHubBinding(
+        binding: ProjectGitHubBinding
+    ) {
+        getProject(binding.projectId)
+        githubBindingStore.save(binding)
+    }
+
+    /**
+     * Removes the GitHub association without deleting
+     * the local project or remote GitHub repository.
+     */
+    fun removeGitHubBinding(projectId: String) {
+        getProject(projectId)
+        githubBindingStore.remove(projectId)
+    }
+
+    /**
+     * Updates project metadata while preserving all existing
+     * metadata fields that are not explicitly changed.
+     */
+    @Synchronized
+    private fun updateMetadata(
+        projectId: String,
+        update: (JSONObject) -> Unit
+    ) {
+        val directory = projectDir(projectId)
+        val metadataFile = File(
+            directory,
+            ".andro-project.json"
+        )
+
+        check(metadataFile.isFile) {
+            "Project metadata is missing."
+        }
+
+        val json = JSONObject(
+            metadataFile.readText(Charsets.UTF_8)
+        )
+
+        require(json.optString("id") == projectId) {
+            "Project metadata does not match its directory."
+        }
+
+        update(json)
+
+        writeMetadataAtomically(metadataFile, json)
+    }
+
+    /**
+     * Writes metadata through a temporary file and backup.
+     * This prevents an interrupted metadata update from
+     * leaving a partially written JSON document.
+     */
+    private fun writeMetadataAtomically(
+        destination: File,
+        json: JSONObject
+    ) {
+        val parent = destination.parentFile
+            ?: error("Invalid project metadata location.")
+
+        val temporary = File(
+            parent,
+            ".andro-project.${UUID.randomUUID()}.tmp"
+        )
+
+        val backup = File(
+            parent,
+            ".andro-project.${UUID.randomUUID()}.bak"
+        )
+
+        try {
+            FileOutputStream(temporary).use { output ->
+                output.write(
+                    json.toString().toByteArray(Charsets.UTF_8)
+                )
+                output.fd.sync()
+            }
+
+            check(temporary.isFile && temporary.length() > 0L) {
+                "Could not write project metadata."
+            }
+
+            check(destination.renameTo(backup)) {
+                "Could not preserve existing project metadata."
+            }
+
+            if (!temporary.renameTo(destination)) {
+                backup.renameTo(destination)
+                error("Could not activate updated project metadata.")
+            }
+
+            backup.delete()
+        } finally {
+            temporary.delete()
+
+            if (backup.exists() && !destination.exists()) {
+                backup.renameTo(destination)
+            }
+
+            if (backup.exists() && destination.exists()) {
+                backup.delete()
+            }
+        }
+    }
 
     suspend fun importToolchain(treeUri: Uri) =
         withContext(Dispatchers.IO) {
@@ -535,8 +811,14 @@ class ProjectRepository(private val context: Context) {
                     .readText(Charsets.UTF_8)
             )
 
+            val id = json.getString("id")
+
+            require(id == dir.name) {
+                "Project metadata ID does not match its directory."
+            }
+
             ProjectInfo(
-                id = json.getString("id"),
+                id = id,
                 name = json.getString("name"),
                 rootPath = dir.absolutePath,
                 hasGradleWrapper =
