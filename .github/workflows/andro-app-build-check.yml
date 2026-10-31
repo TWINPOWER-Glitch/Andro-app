@@ -1,4 +1,3 @@
-
 name: Andro Android CI, APK Tests and Releases
 
 on:
@@ -195,6 +194,210 @@ jobs:
           echo "path=$APK" >> "$GITHUB_OUTPUT"
           echo "Using APK: $APK"
 
+      - name: Prepare emulator smoke-test script
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > smoke-test.sh <<'SMOKE_TEST'
+          #!/bin/sh
+
+          set -eu
+
+          APK_PATH="${1:?Debug APK path was not supplied}"
+
+          mkdir -p smoke-test-results
+
+          capture_diagnostics() {
+            echo "Capturing emulator diagnostics..."
+
+            adb logcat -d -t 5000 \
+              > smoke-test-results/logcat.txt 2>&1 || true
+
+            adb shell dumpsys activity activities \
+              > smoke-test-results/activities.txt 2>&1 || true
+
+            adb shell screencap -p /sdcard/andro-smoke.png \
+              > /dev/null 2>&1 || true
+
+            adb pull /sdcard/andro-smoke.png \
+              smoke-test-results/andro-screen.png \
+              > /dev/null 2>&1 || true
+
+            echo "Diagnostics capture finished."
+          }
+
+          trap capture_diagnostics EXIT
+
+          echo "Waiting for Android emulator..."
+
+          adb wait-for-device
+
+          BOOTED=""
+          ATTEMPT=0
+
+          while [ "$ATTEMPT" -lt 60 ]; do
+            BOOTED="$(adb shell getprop sys.boot_completed | tr -d '\r' || true)"
+
+            if [ "$BOOTED" = "1" ]; then
+              break
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 2
+          done
+
+          if [ "$BOOTED" != "1" ]; then
+            echo "Android emulator did not finish booting."
+            exit 1
+          fi
+
+          echo "Emulator boot completed."
+
+          if [ ! -s "$APK_PATH" ]; then
+            echo "Debug APK does not exist: $APK_PATH"
+            exit 1
+          fi
+
+          echo "Installing Andro APK..."
+
+          adb install -r "$APK_PATH"
+
+          echo "Stopping any previous Andro process..."
+
+          adb shell am force-stop com.twinpower.andro
+
+          echo "Launching Andro MainActivity..."
+
+          adb shell am start -W \
+            -n com.twinpower.andro/.MainActivity
+
+          sleep 10
+
+          echo "Checking that the Andro process is alive..."
+
+          if ! adb shell pidof com.twinpower.andro \
+            > smoke-test-results/process-id.txt 2>&1; then
+            echo "Andro process was not found after launch."
+            exit 1
+          fi
+
+          PID="$(tr -d '\r\n' < smoke-test-results/process-id.txt)"
+
+          if [ -z "$PID" ]; then
+            echo "Andro process is not running."
+            exit 1
+          fi
+
+          echo "Andro process is running: $PID"
+
+          echo "Inspecting initial Workspace UI..."
+
+          adb shell uiautomator dump \
+            /sdcard/andro-workspace.xml
+
+          adb pull /sdcard/andro-workspace.xml \
+            smoke-test-results/workspace-ui.xml
+
+          if ! grep -F 'ANDRO' smoke-test-results/workspace-ui.xml; then
+            echo "Andro title was not found in the rendered UI."
+            exit 1
+          fi
+
+          if ! grep -F 'LOCAL WORKSPACE' smoke-test-results/workspace-ui.xml; then
+            echo "Workspace interface was not found."
+            exit 1
+          fi
+
+          echo "Workspace UI verified."
+
+          echo "Locating Connections navigation item..."
+
+          TAB_LINE="$(grep -F 'text="Connections"' \
+            smoke-test-results/workspace-ui.xml | head -n 1 || true)"
+
+          TAB_BOUNDS="$(printf '%s\n' "$TAB_LINE" | sed -n \
+            's/.*bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]".*/\1 \2 \3 \4/p')"
+
+          if [ -z "$TAB_BOUNDS" ]; then
+            echo "Connections navigation item was not found."
+            exit 1
+          fi
+
+          set -- $TAB_BOUNDS
+
+          X1="$1"
+          Y1="$2"
+          X2="$3"
+          Y2="$4"
+
+          TAB_X=$(( (X1 + X2) / 2 ))
+          TAB_Y=$(( (Y1 + Y2) / 2 ))
+
+          adb shell input tap "$TAB_X" "$TAB_Y"
+
+          sleep 3
+
+          echo "Inspecting Connections screen..."
+
+          FOUND_REMOTE_BUILDS=""
+          ATTEMPT=0
+
+          while [ "$ATTEMPT" -lt 20 ]; do
+            adb shell uiautomator dump \
+              /sdcard/andro-connections.xml \
+              > /dev/null
+
+            adb pull /sdcard/andro-connections.xml \
+              smoke-test-results/connections-ui.xml \
+              > /dev/null
+
+            if grep -F 'GITHUB PROJECT SYNC' \
+              smoke-test-results/connections-ui.xml; then
+              FOUND_REMOTE_BUILDS="yes"
+              break
+            fi
+
+            adb shell input swipe 540 1600 540 450 350
+            sleep 1
+
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          if [ "$FOUND_REMOTE_BUILDS" != "yes" ]; then
+            echo "GitHub Project Sync UI was not found on Connections screen."
+            exit 1
+          fi
+
+          if ! grep -F 'Push project and start remote build' \
+            smoke-test-results/connections-ui.xml; then
+            echo "Remote build action was not found in the UI."
+            exit 1
+          fi
+
+          echo "GitHub Remote Builds UI verified."
+
+          echo "Checking foreground activity..."
+
+          adb shell dumpsys activity activities \
+            > smoke-test-results/activities.txt
+
+          if ! grep -E 'mResumedActivity|topResumedActivity' \
+            smoke-test-results/activities.txt \
+            | grep -F 'com.twinpower.andro'; then
+            echo "Andro is not the resumed foreground activity."
+            exit 1
+          fi
+
+          echo "Andro installation, launch and UI smoke tests passed."
+          SMOKE_TEST
+
+          chmod +x smoke-test.sh
+
+          test -s smoke-test.sh
+
+          echo "Emulator smoke-test script prepared."
+
       - name: Install, launch and inspect Andro
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -203,185 +406,7 @@ jobs:
           arch: x86_64
           profile: pixel_2
           disable-animations: true
-          script: |
-            set -eu
-
-            mkdir -p smoke-test-results
-
-            capture_diagnostics() {
-              adb logcat -d -t 5000 \
-                > smoke-test-results/logcat.txt 2>&1 || true
-
-              adb shell dumpsys activity activities \
-                > smoke-test-results/activities.txt 2>&1 || true
-
-              adb shell screencap -p /sdcard/andro-smoke.png \
-                > /dev/null 2>&1 || true
-
-              adb pull /sdcard/andro-smoke.png \
-                smoke-test-results/andro-screen.png \
-                > /dev/null 2>&1 || true
-            }
-
-            trap capture_diagnostics EXIT
-
-            echo "Waiting for Android emulator..."
-
-            adb wait-for-device
-
-            BOOTED=""
-            ATTEMPT=0
-
-            while [ "$ATTEMPT" -lt 60 ]; do
-              BOOTED="$(adb shell getprop sys.boot_completed | tr -d '\r' || true)"
-
-              if [ "$BOOTED" = "1" ]; then
-                break
-              fi
-
-              ATTEMPT=$((ATTEMPT + 1))
-              sleep 2
-            done
-
-            if [ "$BOOTED" != "1" ]; then
-              echo "Android emulator did not finish booting."
-              exit 1
-            fi
-
-            echo "Emulator boot completed."
-
-            echo "Installing Andro APK..."
-
-            adb install -r "${{ steps.apk.outputs.path }}"
-
-            echo "Stopping any previous Andro process..."
-
-            adb shell am force-stop com.twinpower.andro
-
-            echo "Launching Andro MainActivity..."
-
-            adb shell am start -W \
-              -n com.twinpower.andro/.MainActivity
-
-            sleep 10
-
-            echo "Checking that the Andro process is alive..."
-
-            if ! adb shell pidof com.twinpower.andro \
-              > smoke-test-results/process-id.txt 2>&1; then
-              echo "Andro process was not found after launch."
-              exit 1
-            fi
-
-            PID="$(tr -d '\r\n' < smoke-test-results/process-id.txt)"
-
-            if [ -z "$PID" ]; then
-              echo "Andro process is not running."
-              exit 1
-            fi
-
-            echo "Andro process is running: $PID"
-
-            echo "Inspecting initial Workspace UI..."
-
-            adb shell uiautomator dump \
-              /sdcard/andro-workspace.xml
-
-            adb pull /sdcard/andro-workspace.xml \
-              smoke-test-results/workspace-ui.xml
-
-            if ! grep -F 'ANDRO' smoke-test-results/workspace-ui.xml; then
-              echo "Andro title was not found in the rendered UI."
-              exit 1
-            fi
-
-            if ! grep -F 'LOCAL WORKSPACE' smoke-test-results/workspace-ui.xml; then
-              echo "Workspace interface was not found."
-              exit 1
-            fi
-
-            echo "Workspace UI verified."
-
-            echo "Locating Connections navigation item..."
-
-            TAB_LINE="$(grep -F 'text="Connections"' \
-              smoke-test-results/workspace-ui.xml | head -n 1 || true)"
-
-            TAB_BOUNDS="$(printf '%s\n' "$TAB_LINE" | sed -n \
-              's/.*bounds="\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]\[\([0-9][0-9]*\),\([0-9][0-9]*\)\]".*/\1 \2 \3 \4/p')"
-
-            if [ -z "$TAB_BOUNDS" ]; then
-              echo "Connections navigation item was not found."
-              exit 1
-            fi
-
-            set -- $TAB_BOUNDS
-
-            X1="$1"
-            Y1="$2"
-            X2="$3"
-            Y2="$4"
-
-            TAB_X=$(( (X1 + X2) / 2 ))
-            TAB_Y=$(( (Y1 + Y2) / 2 ))
-
-            adb shell input tap "$TAB_X" "$TAB_Y"
-
-            sleep 3
-
-            echo "Inspecting Connections screen..."
-
-            FOUND_REMOTE_BUILDS=""
-
-            ATTEMPT=0
-
-            while [ "$ATTEMPT" -lt 20 ]; do
-              adb shell uiautomator dump \
-                /sdcard/andro-connections.xml \
-                > /dev/null
-
-              adb pull /sdcard/andro-connections.xml \
-                smoke-test-results/connections-ui.xml \
-                > /dev/null
-
-              if grep -F 'GITHUB PROJECT SYNC' \
-                smoke-test-results/connections-ui.xml; then
-                FOUND_REMOTE_BUILDS="yes"
-                break
-              fi
-
-              adb shell input swipe 540 1600 540 450 350
-              sleep 1
-
-              ATTEMPT=$((ATTEMPT + 1))
-            done
-
-            if [ "$FOUND_REMOTE_BUILDS" != "yes" ]; then
-              echo "GitHub Project Sync UI was not found on Connections screen."
-              exit 1
-            fi
-
-            if ! grep -F 'Push project and start remote build' \
-              smoke-test-results/connections-ui.xml; then
-              echo "Remote build action was not found in the UI."
-              exit 1
-            fi
-
-            echo "GitHub Remote Builds UI verified."
-
-            echo "Checking foreground activity..."
-
-            adb shell dumpsys activity activities \
-              > smoke-test-results/activities.txt
-
-            if ! grep -E 'mResumedActivity|topResumedActivity' \
-              smoke-test-results/activities.txt \
-              | grep -F 'com.twinpower.andro'; then
-              echo "Andro is not the resumed foreground activity."
-              exit 1
-            fi
-
-            echo "Andro installation, launch and UI smoke tests passed."
+          script: sh smoke-test.sh "${{ steps.apk.outputs.path }}"
 
       - name: Upload emulator diagnostics
         if: always()
