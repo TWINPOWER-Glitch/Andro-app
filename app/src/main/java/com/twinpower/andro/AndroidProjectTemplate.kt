@@ -1,3 +1,4 @@
+
 package com.twinpower.andro
 
 import java.io.File
@@ -5,7 +6,7 @@ import java.io.File
 /**
  * Generates a minimal, conventional Gradle Android application project.
  *
- * The installed Andro toolchain supplies Gradle, Java and the Android SDK.
+ * Generated projects use GitHub Actions as their remote build engine.
  * A Gradle wrapper is intentionally not fabricated: its JAR must come
  * from the official Gradle wrapper distribution.
  */
@@ -160,6 +161,60 @@ object AndroidProjectTemplate {
                 local.properties
                 *.iml
                 .idea/
+            """.trimIndent()
+        )
+
+        write(
+            destination,
+            ".github/workflows/android-build.yml",
+            """
+                name: Android Remote Build
+
+                on:
+                  workflow_dispatch:
+
+                permissions:
+                  contents: read
+
+                concurrency:
+                  group: android-build-${'$'}{{ github.ref }}
+                  cancel-in-progress: false
+
+                jobs:
+                  build:
+                    name: Build Android APK
+                    runs-on: ubuntu-latest
+
+                    steps:
+                      - name: Check out project
+                        uses: actions/checkout@v4
+                        with:
+                          persist-credentials: false
+
+                      - name: Set up Java 17
+                        uses: actions/setup-java@v4
+                        with:
+                          distribution: temurin
+                          java-version: '17'
+
+                      - name: Set up Android SDK
+                        uses: android-actions/setup-android@v3
+
+                      - name: Set up Gradle
+                        uses: gradle/actions/setup-gradle@v4
+                        with:
+                          gradle-version: '8.11.1'
+
+                      - name: Build debug APK
+                        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+                      - name: Upload APK artifact
+                        uses: actions/upload-artifact@v4
+                        with:
+                          name: andro-debug-apk
+                          path: app/build/outputs/apk/debug/*.apk
+                          if-no-files-found: error
+                          retention-days: 14
             """.trimIndent()
         )
     }
