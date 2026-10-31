@@ -40,6 +40,10 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         repository.listProjects()
     }
 
+    val bindingStore = remember(context) {
+        ProjectGitHubBindingStore(context)
+    }
+
     var selectedProject by remember {
         mutableStateOf(projects.firstOrNull())
     }
@@ -105,6 +109,48 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         GitHubBuildOrchestrator(sync, workflowManager)
     }
 
+    /**
+     * Restore the saved GitHub repository association whenever
+     * the selected local project changes.
+     */
+    LaunchedEffect(selectedProject?.id) {
+        val project = selectedProject
+
+        workflows = emptyList()
+        selectedWorkflow = null
+        runs = emptyList()
+        selectedRun = null
+        artifacts = emptyList()
+
+        if (project == null) {
+            owner = ""
+            repositoryName = ""
+            branch = "main"
+            return@LaunchedEffect
+        }
+
+        val savedBinding = runCatching {
+            bindingStore.get(project.id)
+        }.getOrNull()
+
+        if (savedBinding != null) {
+            owner = savedBinding.owner
+            repositoryName = savedBinding.repository
+            branch = savedBinding.branch
+
+            status =
+                "Restored GitHub settings for ${project.name}. " +
+                "Load workflows to restore the saved workflow selection."
+        } else {
+            owner = ""
+            repositoryName = ""
+            branch = "main"
+
+            status =
+                "No GitHub repository is saved for ${project.name}."
+        }
+    }
+
     fun repositoryParts(): Pair<String, String>? {
         val cleanOwner = owner.trim()
         val cleanRepository = repositoryName.trim()
@@ -118,6 +164,46 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         }
 
         return cleanOwner to cleanRepository
+    }
+
+    fun saveRepositorySettings(): Boolean {
+        val project = selectedProject
+
+        if (project == null) {
+            status = "Select a local project first."
+            return false
+        }
+
+        val parts = repositoryParts() ?: return false
+        val workflow = selectedWorkflow
+
+        if (workflow == null) {
+            status = "Load workflows and select a workflow before saving settings."
+            return false
+        }
+
+        if (workflow.state != "active") {
+            status = "The selected GitHub workflow is not active."
+            return false
+        }
+
+        return runCatching {
+            bindingStore.save(
+                ProjectGitHubBinding(
+                    projectId = project.id,
+                    owner = parts.first,
+                    repository = parts.second,
+                    branch = branch.trim(),
+                    workflowId = workflow.id
+                )
+            )
+        }.onSuccess {
+            status =
+                "GitHub settings saved for ${project.name}."
+        }.onFailure {
+            status = it.message
+                ?: "Could not save GitHub repository settings."
+        }.isSuccess
     }
 
     fun loadWorkflows() {
@@ -137,7 +223,14 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             }.onSuccess { result ->
                 workflows = result
 
+                val savedBinding = selectedProject?.let {
+                    bindingStore.get(it.id)
+                }
+
                 selectedWorkflow = result.firstOrNull {
+                    it.id == savedBinding?.workflowId &&
+                        it.state == "active"
+                } ?: result.firstOrNull {
                     it.state == "active"
                 }
 
@@ -264,6 +357,28 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             loading = true
             selectedRun = null
             artifacts = emptyList()
+
+            status = "Saving repository settings..."
+
+            val bindingSaved = runCatching {
+                bindingStore.save(
+                    ProjectGitHubBinding(
+                        projectId = project.id,
+                        owner = parts.first,
+                        repository = parts.second,
+                        branch = branch.trim(),
+                        workflowId = workflow.id
+                    )
+                )
+            }
+
+            if (bindingSaved.isFailure) {
+                status = bindingSaved.exceptionOrNull()?.message
+                    ?: "Could not save GitHub repository settings."
+                loading = false
+                return@launch
+            }
+
             status = "Uploading project files and dispatching remote build..."
 
             runCatching {
@@ -536,6 +651,14 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         }
                     )
                 }
+            }
+
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !loading && selectedWorkflow != null,
+                onClick = { saveRepositorySettings() }
+            ) {
+                Text("Save repository settings")
             }
 
             Button(
