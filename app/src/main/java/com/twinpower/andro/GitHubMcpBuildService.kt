@@ -3,6 +3,7 @@ package com.twinpower.andro
 
 import android.content.Context
 import java.io.IOException
+import kotlinx.coroutines.delay
 
 /**
  * Secure bridge between Andro MCP build requests
@@ -111,6 +112,90 @@ class GitHubMcpBuildService(
                 workflowId = binding.workflowId,
                 commitMessage = commitMessage.trim()
             )
+        )
+    }
+
+    /**
+     * Finds the GitHub Actions run created by a previous dispatch.
+     *
+     * GitHub's workflow_dispatch endpoint does not return a run ID.
+     * This method therefore searches the project's bound repository,
+     * checking the workflow, branch and dispatch timestamp.
+     *
+     * The lookup is bounded to approximately 30 seconds.
+     */
+    suspend fun findDispatchedRun(
+        projectId: String,
+        dispatch: RemoteBuildDispatch
+    ): GitHubWorkflowRun {
+
+        require(projectId.isNotBlank()) {
+            "Project ID is required."
+        }
+
+        // Confirm that the project still exists in Andro's workspace.
+        repository.getProject(projectId)
+
+        // Resolve the repository exclusively from the saved binding.
+        val binding = bindingStore.get(projectId)
+            ?: throw IOException(
+                "This project has no saved GitHub repository configuration."
+            )
+
+        // Do not allow a dispatch result for another repository,
+        // branch or workflow to be used with this project.
+        val expectedRepository =
+            "${binding.owner}/${binding.repository}"
+
+        require(dispatch.repository.equals(
+            expectedRepository,
+            ignoreCase = true
+        )) {
+            "The dispatched repository does not match this project's saved GitHub binding."
+        }
+
+        require(dispatch.branch == binding.branch) {
+            "The dispatched branch does not match this project's saved GitHub binding."
+        }
+
+        require(dispatch.workflowId == binding.workflowId) {
+            "The dispatched workflow does not match this project's saved GitHub binding."
+        }
+
+        require(dispatch.dispatchedAt.isNotBlank()) {
+            "The dispatch timestamp is missing."
+        }
+
+        // Use the existing secure GitHub token store.
+        val token = tokenProvider()
+            ?.takeIf { it.isNotBlank() }
+            ?: throw IOException(
+                "GitHub is not connected. Authenticate before looking up a workflow run."
+            )
+
+        val orchestrator = createOrchestrator(token)
+        var lastLookupError: IOException? = null
+
+        // Fifteen checks with two-second intervals provide a
+        // bounded lookup period of approximately thirty seconds.
+        repeat(15) { attempt ->
+            try {
+                return orchestrator.findDispatchedRun(dispatch)
+            } catch (error: IOException) {
+                lastLookupError = error
+
+                // Do not delay after the final attempt.
+                if (attempt < 14) {
+                    delay(2_000)
+                }
+            }
+        }
+
+        throw IOException(
+            "GitHub accepted the workflow dispatch, but its run ID " +
+                "could not be located within 30 seconds. The workflow " +
+                "may still appear shortly; refresh the GitHub Actions run list.",
+            lastLookupError
         )
     }
 
