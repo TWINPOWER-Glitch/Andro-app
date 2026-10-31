@@ -1,4 +1,3 @@
-
 package com.twinpower.andro
 
 import okhttp3.MediaType.Companion.toMediaType
@@ -11,6 +10,7 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.FilterInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
@@ -305,11 +305,11 @@ class GitHubWorkflowManager(
     }
 
     /**
-     * Downloads an Actions artifact ZIP and extracts it into:
+     * Downloads a GitHub Actions artifact ZIP and extracts it into:
      *
-     * project/build/andro-artifacts/
+     * project.rootPath/build/andro-artifacts/artifact-{artifactId}
      *
-     * The returned File is the extracted artifact directory.
+     * Returns the extracted artifact directory.
      */
     fun downloadArtifact(
         owner: String,
@@ -323,11 +323,8 @@ class GitHubWorkflowManager(
 
         val projectRoot = File(project.rootPath).canonicalFile
 
-        require(
-            projectRoot.isDirectory &&
-                projectRoot == repositoryProjectDirectory(project.id)
-        ) {
-            "Project directory does not match the selected project."
+        require(projectRoot.isDirectory) {
+            "The selected project directory does not exist."
         }
 
         val downloadUrl =
@@ -340,7 +337,9 @@ class GitHubWorkflowManager(
         ).canonicalFile
 
         require(
-            parent.path.startsWith(projectRoot.path + File.separator)
+            parent.path.startsWith(
+                projectRoot.path + File.separator
+            )
         ) {
             "Artifact destination escapes the project directory."
         }
@@ -348,11 +347,6 @@ class GitHubWorkflowManager(
         check(parent.exists() || parent.mkdirs()) {
             "Could not create artifact directory."
         }
-
-        val staging = File(
-            parent,
-            ".artifact-$artifactId-${System.nanoTime()}.tmp"
-        )
 
         val destination = File(
             parent,
@@ -362,6 +356,11 @@ class GitHubWorkflowManager(
         check(!destination.exists()) {
             "This artifact has already been downloaded. Remove its folder before downloading it again."
         }
+
+        val staging = File(
+            parent,
+            ".artifact-$artifactId-${System.nanoTime()}.tmp"
+        )
 
         check(staging.mkdirs()) {
             "Could not create artifact staging directory."
@@ -419,27 +418,8 @@ class GitHubWorkflowManager(
         }
     }
 
-    private fun repositoryProjectDirectory(
-        projectId: String
-    ): File {
-        // The project root is verified through the repository
-        // instance's canonical project directory.
-        return repositoryDirectory(projectId)
-    }
-
-    private fun repositoryDirectory(
-        projectId: String
-    ): File {
-        return projectRepository.projectDir(projectId).canonicalFile
-    }
-
-    private val projectRepository: ProjectRepository
-        get() = throw UnsupportedOperationException(
-            "ProjectRepository must be supplied to downloadArtifact."
-        )
-
     private fun extractArchive(
-        input: java.io.InputStream,
+        input: InputStream,
         destination: File
     ) {
         var entryCount = 0
@@ -545,7 +525,7 @@ class GitHubWorkflowManager(
     }
 
     private class SizeLimitedInputStream(
-        input: java.io.InputStream,
+        input: InputStream,
         private val limit: Long
     ) : FilterInputStream(input) {
 
@@ -618,14 +598,18 @@ class GitHubWorkflowManager(
         )
     }
 
-    private fun parseRun(item: JSONObject): GitHubWorkflowRun {
+    private fun parseRun(
+        item: JSONObject
+    ): GitHubWorkflowRun {
         return GitHubWorkflowRun(
             id = item.getLong("id"),
             name = item.optString("name"),
             workflowId = item.optLong("workflow_id"),
             status = item.optString("status"),
             conclusion = item.optString("conclusion")
-                .takeIf { it.isNotBlank() && it != "null" },
+                .takeIf {
+                    it.isNotBlank() && it != "null"
+                },
             branch = item.optString("head_branch"),
             commitSha = item.optString("head_sha"),
             htmlUrl = item.optString("html_url"),
