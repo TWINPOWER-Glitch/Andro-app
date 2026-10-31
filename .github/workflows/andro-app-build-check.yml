@@ -56,10 +56,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle 8.13 with caching
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.13"
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
 
       - name: Verify Gradle installation
         run: gradle --version
@@ -76,7 +77,6 @@ jobs:
           set -euo pipefail
 
           sdkmanager \
-            "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0"
 
@@ -110,17 +110,18 @@ jobs:
             exit 1
           fi
 
-      - name: Run unit tests
-        run: gradle --no-daemon testDebugUnitTest
-
-      - name: Run Android lint
-        run: gradle --no-daemon lintDebug
-
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
-
-      - name: Build release APK
-        run: gradle --no-daemon assembleRelease
+      # One Gradle invocation allows Gradle to reuse its task graph,
+      # configuration and daemon across all required build checks.
+      # All production Kotlin files remain included in compilation.
+      - name: Run unit tests, lint and build APKs
+        run: |
+          gradle \
+            --build-cache \
+            --parallel \
+            testDebugUnitTest \
+            lintDebug \
+            assembleDebug \
+            assembleRelease
 
       - name: Validate APK outputs
         shell: bash
@@ -296,6 +297,9 @@ jobs:
             exit 1
           fi
 
+          echo "Waiting for Android device..."
+          adb wait-for-device
+
           echo "Installing Andro..."
           adb install -r "$APK_PATH"
 
@@ -306,9 +310,17 @@ jobs:
           adb shell am start -W \
             -n com.twinpower.andro/.AuthGateActivity
 
-          sleep 8
+          # Wait for the app process instead of using a fixed sleep.
+          PID=""
+          for attempt in $(seq 1 30); do
+            PID="$(adb shell pidof com.twinpower.andro | tr -d '\r\n')"
 
-          PID="$(adb shell pidof com.twinpower.andro | tr -d '\r\n')"
+            if [ -n "$PID" ]; then
+              break
+            fi
+
+            sleep 2
+          done
 
           if [ -z "$PID" ]; then
             echo "Andro process is not running."
@@ -317,14 +329,7 @@ jobs:
 
           echo "Andro process running: $PID"
 
-          adb shell dumpsys activity activities \
-            > "$RESULTS/activities.txt"
-
-          if ! grep -Fq 'AuthGateActivity' "$RESULTS/activities.txt"; then
-            echo "Authentication activity was not found."
-            exit 1
-          fi
-
+          # Allow Compose to finish rendering before inspecting the UI.
           adb shell uiautomator dump \
             /sdcard/andro-auth-screen.xml
 
@@ -346,9 +351,16 @@ jobs:
             fi
           done
 
+          adb shell dumpsys activity activities \
+            > "$RESULTS/activities.txt"
+
+          if ! grep -Fq 'AuthGateActivity' "$RESULTS/activities.txt"; then
+            echo "Authentication activity was not found."
+            exit 1
+          fi
+
           echo "Andro authentication UI verified."
           echo "GitHub sign-in was not activated."
-
           echo "Smoke test passed. Diagnostics will be captured before cleanup by the EXIT trap."
           SMOKE_TEST
 
