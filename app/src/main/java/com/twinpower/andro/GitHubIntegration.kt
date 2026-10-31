@@ -1,4 +1,3 @@
-
 package com.twinpower.andro
 
 import android.content.ClipData
@@ -47,7 +46,7 @@ data class GitHubRepository(
     val htmlUrl: String
 )
 
-private data class GitHubDeviceCode(
+internal data class GitHubDeviceCode(
     val deviceCode: String,
     val userCode: String,
     val verificationUri: String,
