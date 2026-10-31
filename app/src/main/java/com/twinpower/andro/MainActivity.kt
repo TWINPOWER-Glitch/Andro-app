@@ -129,6 +129,10 @@ private fun AndroApp(
         mutableStateOf(false)
     }
 
+    val drawerState = rememberDrawerState(
+        initialValue = DrawerValue.Closed
+    )
+
     fun refreshProjects() {
         projects = repository.listProjects()
 
@@ -142,6 +146,21 @@ private fun AndroApp(
             emptyList()
         } else {
             repository.listFiles(projectId)
+        }
+    }
+
+    fun navigateTo(destination: String) {
+        screen = destination
+
+        if (
+            destination == "Workspace" ||
+            destination == "Editor"
+        ) {
+            refreshFiles()
+        }
+
+        scope.launch {
+            drawerState.close()
         }
     }
 
@@ -177,220 +196,575 @@ private fun AndroApp(
             surfaceVariant = Color(0xFF202B40)
         )
     ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text(
-                                "ANDRO",
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = 3.sp
-                            )
 
-                            Text(
-                                "Android development environment",
-                                style = MaterialTheme.typography.labelSmall
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            gesturesEnabled = true,
+            drawerContent = {
+                ModalDrawerSheet(
+                    drawerContainerColor =
+                        MaterialTheme.colorScheme.surface,
+                    drawerTonalElevation = 4.dp
+                ) {
+
+                    // Drawer header.
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                horizontal = 20.dp,
+                                vertical = 24.dp
+                            ),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "ANDRO",
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 4.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        Text(
+                            "Android development environment",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(top = 12.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant
+                        )
+                    }
+
+                    // Main navigation destinations.
+                    NavigationDrawerItem(
+                        label = {
+                            Text("Workspace")
+                        },
+                        selected = screen == "Workspace",
+                        onClick = {
+                            navigateTo("Workspace")
+                        },
+                        icon = {
+                            Text("⌂")
+                        },
+                        modifier = Modifier.padding(
+                            NavigationDrawerItemDefaults.ItemPadding
+                        )
+                    )
+
+                    NavigationDrawerItem(
+                        label = {
+                            Text("Editor")
+                        },
+                        selected = screen == "Editor",
+                        onClick = {
+                            navigateTo("Editor")
+                        },
+                        icon = {
+                            Text("</>")
+                        },
+                        modifier = Modifier.padding(
+                            NavigationDrawerItemDefaults.ItemPadding
+                        )
+                    )
+
+                    NavigationDrawerItem(
+                        label = {
+                            Text("Builds")
+                        },
+                        selected = screen == "Builds",
+                        onClick = {
+                            navigateTo("Builds")
+                        },
+                        icon = {
+                            Text("⚙")
+                        },
+                        modifier = Modifier.padding(
+                            NavigationDrawerItemDefaults.ItemPadding
+                        )
+                    )
+
+                    NavigationDrawerItem(
+                        label = {
+                            Text("Connections")
+                        },
+                        selected = screen == "Connections",
+                        onClick = {
+                            navigateTo("Connections")
+                        },
+                        icon = {
+                            Text("⇄")
+                        },
+                        modifier = Modifier.padding(
+                            NavigationDrawerItemDefaults.ItemPadding
+                        )
+                    )
+
+                    HorizontalDivider(
+                        modifier = Modifier.padding(
+                            horizontal = 20.dp,
+                            vertical = 16.dp
+                        ),
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+
+                    // Workspace information.
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "WORKSPACE",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.secondary,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text(
+                            "Projects: ${projects.size}",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        Text(
+                            selected?.let {
+                                "Selected: ${it.name}"
+                            } ?: "No project selected",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Text(
+                            "Build engine: GitHub Actions",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    Spacer(Modifier.weight(1f))
+
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant
+                    )
+
+                    Text(
+                        "ANDRO · Development workspace",
+                        modifier = Modifier.padding(20.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        ) {
+
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        navigationIcon = {
+                            IconButton(
+                                onClick = {
+                                    scope.launch {
+                                        drawerState.open()
+                                    }
+                                }
+                            ) {
+                                Text(
+                                    "☰",
+                                    fontSize = 25.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        },
+                        title = {
+                            Column {
+                                Text(
+                                    "ANDRO",
+                                    fontWeight = FontWeight.Black,
+                                    letterSpacing = 3.sp
+                                )
+
+                                Text(
+                                    "Android development environment",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    )
+                },
+                bottomBar = {
+                    NavigationBar {
+                        listOf(
+                            "Workspace",
+                            "Editor",
+                            "Builds",
+                            "Connections"
+                        ).forEach { destination ->
+
+                            NavigationBarItem(
+                                selected = screen == destination,
+                                onClick = {
+                                    screen = destination
+
+                                    if (
+                                        destination == "Workspace" ||
+                                        destination == "Editor"
+                                    ) {
+                                        refreshFiles()
+                                    }
+                                },
+                                icon = {
+                                    Text(
+                                        when (destination) {
+                                            "Workspace" -> "⌂"
+                                            "Editor" -> "</>"
+                                            "Builds" -> "⚙"
+                                            else -> "⇄"
+                                        }
+                                    )
+                                },
+                                label = {
+                                    Text(destination)
+                                }
                             )
                         }
                     }
-                )
-            },
-            bottomBar = {
-                NavigationBar {
-                    listOf(
-                        "Workspace",
-                        "Editor",
-                        "Builds",
-                        "Connections"
-                    ).forEach { destination ->
-
-                        NavigationBarItem(
-                            selected = screen == destination,
-                            onClick = {
-                                screen = destination
-
-                                if (
-                                    destination == "Workspace" ||
-                                    destination == "Editor"
-                                ) {
-                                    refreshFiles()
-                                }
-                            },
-                            icon = {
-                                Text(
-                                    when (destination) {
-                                        "Workspace" -> "⌂"
-                                        "Editor" -> "</>"
-                                        "Builds" -> "⚙"
-                                        else -> "⇄"
-                                    }
-                                )
-                            },
-                            label = {
-                                Text(destination)
-                            }
-                        )
-                    }
                 }
-            }
-        ) { padding ->
+            ) { padding ->
 
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
 
-                when (screen) {
+                    when (screen) {
 
-                    "Workspace" -> {
+                        "Workspace" -> {
 
-                        item {
-                            Card(
-                                shape = RoundedCornerShape(22.dp)
-                            ) {
-                                Column(
+                            item {
+                                Card(
+                                    shape = RoundedCornerShape(22.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(18.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Text(
+                                            "LOCAL WORKSPACE",
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            style = MaterialTheme.typography.labelLarge
+                                        )
+
+                                        Text(
+                                            "Your Android development workspace",
+                                            style = MaterialTheme.typography.headlineSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+
+                                        Text(
+                                            "Create a project or import an existing Android project into Andro's private workspace."
+                                        )
+
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Button(
+                                                onClick = {
+                                                    showCreateProject = true
+                                                },
+                                                enabled = !busy
+                                            ) {
+                                                Text("New project")
+                                            }
+
+                                            OutlinedButton(
+                                                onClick = {
+                                                    projectPicker.launch(null)
+                                                },
+                                                enabled = !busy
+                                            ) {
+                                                Text("Import")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            item {
+                                Card {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            "BUILD SYSTEM",
+                                            fontWeight = FontWeight.Bold
+                                        )
+
+                                        Text(
+                                            "GitHub Actions",
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+
+                                        Text(
+                                            "Andro uses GitHub Actions for remote Android builds. Your project files remain available in the local workspace."
+                                        )
+                                    }
+                                }
+                            }
+
+                            item {
+                                Text(
+                                    "YOUR PROJECTS · ${projects.size}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            if (projects.isEmpty()) {
+                                item {
+                                    Text(
+                                        "No projects yet. Create or import one.",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            items(
+                                projects,
+                                key = { it.id }
+                            ) { project ->
+
+                                Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(18.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                        .clickable {
+                                            selected = project
+                                            refreshFiles(project.id)
+                                            message = "Selected ${project.name}."
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor =
+                                            if (selected?.id == project.id) {
+                                                MaterialTheme.colorScheme.primaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.surface
+                                            }
+                                    )
                                 ) {
-                                    Text(
-                                        "LOCAL WORKSPACE",
-                                        color = MaterialTheme.colorScheme.secondary,
-                                        style = MaterialTheme.typography.labelLarge
-                                    )
+                                    Column(
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Text(
+                                            project.name,
+                                            fontWeight = FontWeight.Bold
+                                        )
 
-                                    Text(
-                                        "Your Android development workspace",
-                                        style = MaterialTheme.typography.headlineSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                        Text(
+                                            project.rootPath,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
 
-                                    Text(
-                                        "Create a project or import an existing Android project into Andro's private workspace."
-                                    )
+                                        Text(
+                                            if (project.hasGradleWrapper) {
+                                                "Gradle wrapper detected"
+                                            } else {
+                                                "No Gradle wrapper detected"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                }
+                            }
 
+                            if (selected != null) {
+                                item {
+                                    Card {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(16.dp),
+                                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Text(
+                                                "SELECTED PROJECT",
+                                                fontWeight = FontWeight.Bold
+                                            )
+
+                                            Text(
+                                                selected!!.name,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+
+                                            Button(
+                                                onClick = {
+                                                    screen = "Editor"
+                                                    refreshFiles()
+                                                },
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text("Open project editor")
+                                            }
+
+                                            OutlinedButton(
+                                                onClick = {
+                                                    screen = "Builds"
+                                                },
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Text("Open remote build manager")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        "Editor" -> {
+
+                            item {
+                                Text(
+                                    "SOURCE EDITOR",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                Text(
+                                    selected?.name
+                                        ?: "Select a project in Workspace first."
+                                )
+                            }
+
+                            if (selected != null) {
+
+                                item {
                                     Row(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Button(
                                             onClick = {
-                                                showCreateProject = true
-                                            },
-                                            enabled = !busy
+                                                showCreateFile = true
+                                            }
                                         ) {
-                                            Text("New project")
+                                            Text("New file")
                                         }
 
                                         OutlinedButton(
                                             onClick = {
-                                                projectPicker.launch(null)
-                                            },
-                                            enabled = !busy
+                                                showCreateDirectory = true
+                                            }
                                         ) {
-                                            Text("Import")
+                                            Text("New folder")
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = {
+                                                refreshFiles()
+                                            }
+                                        ) {
+                                            Text("Refresh")
                                         }
                                     }
                                 }
-                            }
-                        }
 
-                        item {
-                            Card {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        "BUILD SYSTEM",
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                if (files.isEmpty()) {
+                                    item {
+                                        Text("This project has no visible files.")
+                                    }
+                                }
 
-                                    Text(
-                                        "GitHub Actions",
-                                        color = MaterialTheme.colorScheme.secondary,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                                items(
+                                    files,
+                                    key = { it }
+                                ) { path ->
 
-                                    Text(
-                                        "Andro uses GitHub Actions for remote Android builds. Your project files remain available in the local workspace."
-                                    )
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                scope.launch {
+                                                    runCatching {
+                                                        repository.readFile(
+                                                            selected!!.id,
+                                                            path
+                                                        )
+                                                    }.onSuccess { content ->
+                                                        editingPath = path
+                                                        editorContent = content
+                                                        editorDirty = false
+                                                        showEditor = true
+                                                    }.onFailure {
+                                                        message =
+                                                            "Could not open file: ${it.message}"
+                                                    }
+                                                }
+                                            }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(14.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                path,
+                                                modifier = Modifier.weight(1f),
+                                                style = MaterialTheme.typography.bodyMedium
+                                            )
+
+                                            Text(
+                                                "Open",
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                        }
+                                    }
+                                }
+
+                            } else {
+                                item {
+                                    Text("Create or import a project in Workspace first.")
                                 }
                             }
                         }
 
-                        item {
-                            Text(
-                                "YOUR PROJECTS · ${projects.size}",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                        "Builds" -> {
 
-                        if (projects.isEmpty()) {
                             item {
                                 Text(
-                                    "No projects yet. Create or import one.",
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    "REMOTE BUILD MANAGER",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            item {
+                                GitHubRemoteBuilds(
+                                    repository = repository
                                 )
                             }
                         }
 
-                        items(
-                            projects,
-                            key = { it.id }
-                        ) { project ->
+                        "Connections" -> {
 
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        selected = project
-                                        refreshFiles(project.id)
-                                        message = "Selected ${project.name}."
-                                    },
-                                colors = CardDefaults.cardColors(
-                                    containerColor =
-                                        if (selected?.id == project.id) {
-                                            MaterialTheme.colorScheme.primaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.surface
-                                        }
+                            item {
+                                Text(
+                                    "CONNECTIONS",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
                                 )
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                                ) {
-                                    Text(
-                                        project.name,
-                                        fontWeight = FontWeight.Bold
-                                    )
-
-                                    Text(
-                                        project.rootPath,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-
-                                    Text(
-                                        if (project.hasGradleWrapper) {
-                                            "Gradle wrapper detected"
-                                        } else {
-                                            "No Gradle wrapper detected"
-                                        },
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
                             }
-                        }
 
-                        if (selected != null) {
                             item {
                                 Card {
                                     Column(
@@ -400,258 +774,83 @@ private fun AndroApp(
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
-                                            "SELECTED PROJECT",
+                                            "LOCAL MCP SERVER",
                                             fontWeight = FontWeight.Bold
                                         )
 
                                         Text(
-                                            selected!!.name,
-                                            color = MaterialTheme.colorScheme.secondary
+                                            "Expose local project and build tools to an MCP-compatible client."
                                         )
 
-                                        Button(
-                                            onClick = {
-                                                screen = "Editor"
-                                                refreshFiles()
-                                            },
-                                            modifier = Modifier.fillMaxWidth()
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text("Open project editor")
-                                        }
-
-                                        OutlinedButton(
-                                            onClick = {
-                                                screen = "Builds"
-                                            },
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Text("Open remote build manager")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    "Editor" -> {
-
-                        item {
-                            Text(
-                                "SOURCE EDITOR",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-
-                            Text(
-                                selected?.name
-                                    ?: "Select a project in Workspace first."
-                            )
-                        }
-
-                        if (selected != null) {
-
-                            item {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Button(
-                                        onClick = {
-                                            showCreateFile = true
-                                        }
-                                    ) {
-                                        Text("New file")
-                                    }
-
-                                    OutlinedButton(
-                                        onClick = {
-                                            showCreateDirectory = true
-                                        }
-                                    ) {
-                                        Text("New folder")
-                                    }
-
-                                    OutlinedButton(
-                                        onClick = {
-                                            refreshFiles()
-                                        }
-                                    ) {
-                                        Text("Refresh")
-                                    }
-                                }
-                            }
-
-                            if (files.isEmpty()) {
-                                item {
-                                    Text("This project has no visible files.")
-                                }
-                            }
-
-                            items(
-                                files,
-                                key = { it }
-                            ) { path ->
-
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            scope.launch {
-                                                runCatching {
-                                                    repository.readFile(
-                                                        selected!!.id,
-                                                        path
-                                                    )
-                                                }.onSuccess { content ->
-                                                    editingPath = path
-                                                    editorContent = content
-                                                    editorDirty = false
-                                                    showEditor = true
-                                                }.onFailure {
-                                                    message =
-                                                        "Could not open file: ${it.message}"
+                                            Text(
+                                                if (mcpRunning) {
+                                                    "Running · 127.0.0.1:8765"
+                                                } else {
+                                                    "Stopped"
                                                 }
-                                            }
-                                        }
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(14.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            path,
-                                            modifier = Modifier.weight(1f),
-                                            style = MaterialTheme.typography.bodyMedium
-                                        )
+                                            )
 
-                                        Text(
-                                            "Open",
-                                            color = MaterialTheme.colorScheme.secondary
-                                        )
-                                    }
-                                }
-                            }
+                                            Spacer(Modifier.weight(1f))
 
-                        } else {
-                            item {
-                                Text("Create or import a project in Workspace first.")
-                            }
-                        }
-                    }
-
-                    "Builds" -> {
-
-                        item {
-                            Text(
-                                "REMOTE BUILD MANAGER",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        item {
-                            GitHubRemoteBuilds(
-                                repository = repository
-                            )
-                        }
-                    }
-
-                    "Connections" -> {
-
-                        item {
-                            Text(
-                                "CONNECTIONS",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        item {
-                            Card {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    Text(
-                                        "LOCAL MCP SERVER",
-                                        fontWeight = FontWeight.Bold
-                                    )
-
-                                    Text(
-                                        "Expose local project and build tools to an MCP-compatible client."
-                                    )
-
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            if (mcpRunning) {
-                                                "Running · 127.0.0.1:8765"
-                                            } else {
-                                                "Stopped"
-                                            }
-                                        )
-
-                                        Spacer(Modifier.weight(1f))
-
-                                        Switch(
-                                            checked = mcpRunning,
-                                            onCheckedChange = { enabled ->
-                                                scope.launch {
-                                                    runCatching {
-                                                        if (enabled) {
-                                                            mcp.start()
-                                                        } else {
-                                                            mcp.stop()
+                                            Switch(
+                                                checked = mcpRunning,
+                                                onCheckedChange = { enabled ->
+                                                    scope.launch {
+                                                        runCatching {
+                                                            if (enabled) {
+                                                                mcp.start()
+                                                            } else {
+                                                                mcp.stop()
+                                                            }
+                                                        }.onSuccess {
+                                                            mcpRunning = enabled
+                                                        }.onFailure {
+                                                            message =
+                                                                "MCP error: ${it.message}"
                                                         }
-                                                    }.onSuccess {
-                                                        mcpRunning = enabled
-                                                    }.onFailure {
-                                                        message =
-                                                            "MCP error: ${it.message}"
                                                     }
                                                 }
-                                            }
+                                            )
+                                        }
+
+                                        Text(
+                                            "http://127.0.0.1:8765/mcp",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+
+                                        Text(
+                                            "This endpoint is accessible only from the phone itself. External AI clients need a separately secured remote connection.",
+                                            style = MaterialTheme.typography.bodySmall
                                         )
                                     }
-
-                                    Text(
-                                        "http://127.0.0.1:8765/mcp",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-
-                                    Text(
-                                        "This endpoint is accessible only from the phone itself. External AI clients need a separately secured remote connection.",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
                                 }
                             }
-                        }
 
-                        item {
-                            CloudflareMcpConnections(
-                                mcp = mcp,
-                                onLocalServerStarted = {
-                                    mcpRunning = true
-                                }
-                            )
-                        }
+                            item {
+                                CloudflareMcpConnections(
+                                    mcp = mcp,
+                                    onLocalServerStarted = {
+                                        mcpRunning = true
+                                    }
+                                )
+                            }
 
-                        item {
-                            GitHubConnections()
+                            item {
+                                GitHubConnections()
+                            }
                         }
                     }
-                }
 
-                item {
-                    Text(
-                        message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    item {
+                        Text(
+                            message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
