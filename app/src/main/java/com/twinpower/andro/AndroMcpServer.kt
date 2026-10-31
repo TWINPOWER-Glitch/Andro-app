@@ -77,7 +77,7 @@ class AndroMcpServer(
                                     "serverInfo",
                                     JSONObject()
                                         .put("name", "andro-local")
-                                        .put("version", "0.4.0")
+                                        .put("version", "0.5.0")
                                 )
                         )
 
@@ -118,7 +118,7 @@ class AndroMcpServer(
                             .put("service", "andro-local-mcp")
                             .put("status", "ok")
                             .put("buildEngine", "github-actions")
-                            .put("mcpVersion", "0.4.0")
+                            .put("mcpVersion", "0.5.0")
                             .toString(),
                         ContentType.Application.Json
                     )
@@ -186,6 +186,14 @@ class AndroMcpServer(
             )
         )
 
+        list.put(
+            tool(
+                "andro_get_remote_build_status",
+                "Get the actual GitHub Actions workflow run status and available artifacts for a locally managed project.",
+                remoteBuildStatusSchema()
+            )
+        )
+
         return list
     }
 
@@ -243,6 +251,38 @@ class AndroMcpServer(
             .put("type", "object")
             .put("properties", properties)
             .put("required", JSONArray().put("projectId"))
+    }
+
+    private fun remoteBuildStatusSchema(): JSONObject {
+        val properties = JSONObject()
+            .put(
+                "projectId",
+                JSONObject()
+                    .put("type", "string")
+                    .put(
+                        "description",
+                        "The ID of the local Andro project associated with the GitHub repository."
+                    )
+            )
+            .put(
+                "runId",
+                JSONObject()
+                    .put("type", "integer")
+                    .put(
+                        "description",
+                        "The GitHub Actions workflow run ID returned by GitHub."
+                    )
+            )
+
+        return JSONObject()
+            .put("type", "object")
+            .put("properties", properties)
+            .put(
+                "required",
+                JSONArray()
+                    .put("projectId")
+                    .put("runId")
+            )
     }
 
     private suspend fun callTool(
@@ -343,7 +383,70 @@ class AndroMcpServer(
                         )
                         .put(
                             "nextStep",
-                            "Query the GitHub Actions workflow runs to monitor the build and retrieve its APK artifact."
+                            "Use andro_get_remote_build_status with the GitHub Actions run ID to monitor the build."
+                        )
+                }
+
+                "andro_get_remote_build_status" -> {
+
+                    val projectId = args.getString("projectId")
+                    val runId = args.getLong("runId")
+
+                    if (runId <= 0) {
+                        throw IllegalArgumentException(
+                            "A valid GitHub Actions run ID is required."
+                        )
+                    }
+
+                    val status = githubBuilds.getRemoteBuildStatus(
+                        projectId = projectId,
+                        runId = runId
+                    )
+
+                    val run = status.run
+
+                    val artifacts = JSONArray().also { array ->
+                        status.artifacts.forEach { artifact ->
+                            array.put(
+                                JSONObject()
+                                    .put("id", artifact.id)
+                                    .put("name", artifact.name)
+                                    .put("sizeBytes", artifact.sizeBytes)
+                                    .put("expired", artifact.expired)
+                            )
+                        }
+                    }
+
+                    JSONObject()
+                        .put("projectId", projectId)
+                        .put("runId", run.id)
+                        .put("name", run.name)
+                        .put("workflowId", run.workflowId)
+                        .put("status", run.status)
+                        .put(
+                            "conclusion",
+                            run.conclusion ?: JSONObject.NULL
+                        )
+                        .put("branch", run.branch)
+                        .put("commitSha", run.commitSha)
+                        .put("htmlUrl", run.htmlUrl)
+                        .put("createdAt", run.createdAt)
+                        .put("updatedAt", run.updatedAt)
+                        .put("completed", status.completed)
+                        .put("successful", status.successful)
+                        .put("artifacts", artifacts)
+                        .put(
+                            "message",
+                            when {
+                                !status.completed ->
+                                    "The GitHub Actions build is still running or queued."
+
+                                status.successful ->
+                                    "The GitHub Actions build completed successfully."
+
+                                else ->
+                                    "The GitHub Actions build finished without success."
+                            }
                         )
                 }
 
