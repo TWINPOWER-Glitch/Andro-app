@@ -8,6 +8,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.http.*
+import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -77,7 +78,7 @@ class AndroMcpServer(
                                     "serverInfo",
                                     JSONObject()
                                         .put("name", "andro-local")
-                                        .put("version", "0.5.0")
+                                        .put("version", "0.6.0")
                                 )
                         )
 
@@ -118,7 +119,7 @@ class AndroMcpServer(
                             .put("service", "andro-local-mcp")
                             .put("status", "ok")
                             .put("buildEngine", "github-actions")
-                            .put("mcpVersion", "0.5.0")
+                            .put("mcpVersion", "0.6.0")
                             .toString(),
                         ContentType.Application.Json
                     )
@@ -173,7 +174,7 @@ class AndroMcpServer(
         list.put(
             tool(
                 "andro_build_project",
-                "Push the selected local project to its saved GitHub repository and dispatch its configured GitHub Actions workflow. Requires GitHub authentication and a saved repository configuration.",
+                "Push the selected local project to its saved GitHub repository, dispatch its configured GitHub Actions workflow, and locate the resulting workflow run ID. Requires GitHub authentication and a saved repository configuration.",
                 buildProjectSchema()
             )
         )
@@ -270,7 +271,7 @@ class AndroMcpServer(
                     .put("type", "integer")
                     .put(
                         "description",
-                        "The GitHub Actions workflow run ID returned by GitHub."
+                        "The GitHub Actions workflow run ID returned by andro_build_project."
                     )
             )
 
@@ -364,10 +365,30 @@ class AndroMcpServer(
                         "Build Android project with Andro"
                     }
 
+                    // First push the project and submit the workflow dispatch.
                     val dispatch = githubBuilds.buildProject(
                         projectId = projectId,
                         commitMessage = commitMessage
                     )
+
+                    // GitHub's dispatch endpoint does not return a run ID.
+                    // Locate the run created by this dispatch.
+                    var locatedRun: GitHubWorkflowRun? = null
+                    var runLookupError: String? = null
+
+                    try {
+                        locatedRun = githubBuilds.findDispatchedRun(
+                            projectId = projectId,
+                            dispatch = dispatch
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Dispatch has already succeeded. A lookup failure
+                        // must not be reported as a failed dispatch.
+                        runLookupError =
+                            e.message ?: "The workflow run is not visible yet."
+                    }
 
                     JSONObject()
                         .put("projectId", projectId)
@@ -378,12 +399,40 @@ class AndroMcpServer(
                         .put("executionEngine", "github-actions")
                         .put("dispatched", true)
                         .put(
+                            "runId",
+                            locatedRun?.id ?: JSONObject.NULL
+                        )
+                        .put(
+                            "runStatus",
+                            locatedRun?.status ?: JSONObject.NULL
+                        )
+                        .put(
+                            "runUrl",
+                            locatedRun?.htmlUrl ?: JSONObject.NULL
+                        )
+                        .put(
+                            "runLookupComplete",
+                            locatedRun != null
+                        )
+                        .put(
+                            "runLookupError",
+                            runLookupError ?: JSONObject.NULL
+                        )
+                        .put(
                             "message",
-                            "Project synchronization completed and GitHub Actions workflow dispatch was submitted."
+                            if (locatedRun != null) {
+                                "Project synchronization completed, the workflow was dispatched, and its GitHub Actions run was located."
+                            } else {
+                                "Project synchronization and workflow dispatch succeeded. GitHub has not made the workflow run visible yet."
+                            }
                         )
                         .put(
                             "nextStep",
-                            "Use andro_get_remote_build_status with the GitHub Actions run ID to monitor the build."
+                            if (locatedRun != null) {
+                                "Call andro_get_remote_build_status with this projectId and runId to monitor the build."
+                            } else {
+                                "Check the repository's GitHub Actions page for the new run. Do not dispatch another build merely because run lookup is delayed."
+                            }
                         )
                 }
 
