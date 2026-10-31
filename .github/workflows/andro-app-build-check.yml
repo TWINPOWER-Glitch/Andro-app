@@ -13,8 +13,6 @@ on:
       - "*.gradle"
       - "*.gradle.kts"
       - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
       - ".github/workflows/andro-app-build-check.yml"
 
   pull_request:
@@ -25,8 +23,6 @@ on:
       - "*.gradle"
       - "*.gradle.kts"
       - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
       - ".github/workflows/andro-app-build-check.yml"
 
   workflow_dispatch:
@@ -59,8 +55,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Verify Gradle installation
+        run: gradle --version
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -94,9 +95,6 @@ jobs:
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "artifact_name=andro-apks-v$VERSION_NAME" >> "$GITHUB_OUTPUT"
 
-          echo "Andro version: $VERSION_NAME"
-          echo "Version code: $VERSION_CODE"
-
       - name: Validate release tag
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -111,29 +109,17 @@ jobs:
             exit 1
           fi
 
-      - name: Validate Gradle Wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f gradlew
-          test -f gradle/wrapper/gradle-wrapper.properties
-
-          chmod +x gradlew
-
-          ./gradlew --version
-
       - name: Run unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest
+        run: gradle --no-daemon testDebugUnitTest
 
       - name: Run Android lint
-        run: ./gradlew --no-daemon lintDebug
+        run: gradle --no-daemon lintDebug
 
       - name: Build debug APK
-        run: ./gradlew --no-daemon assembleDebug
+        run: gradle --no-daemon assembleDebug
 
       - name: Build release APK
-        run: ./gradlew --no-daemon assembleRelease
+        run: gradle --no-daemon assembleRelease
 
       - name: Validate APK outputs
         shell: bash
@@ -213,7 +199,6 @@ jobs:
           test -s "$APK"
 
           echo "path=$APK" >> "$GITHUB_OUTPUT"
-          echo "Using APK: $APK"
 
       - name: Enable KVM hardware acceleration
         shell: bash
@@ -221,7 +206,7 @@ jobs:
           set -euo pipefail
 
           if [ ! -e /dev/kvm ]; then
-            echo "KVM device /dev/kvm is unavailable on this runner."
+            echo "KVM device is unavailable."
             exit 1
           fi
 
@@ -234,124 +219,125 @@ jobs:
 
           ls -l /dev/kvm
 
-          echo "KVM hardware acceleration configured."
-
       - name: Restore Android Virtual Device cache
         id: avd-cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.android/avd
-            ~/.android/adb*
-          key: andro-avd-${{ runner.os }}-api35-google-apis-x86_64-pixel2-v2
+          path: ~/.android/avd
+          key: andro-avd-${{ runner.os }}-api35-google-apis-x86_64-pixel2-v3
 
-      - name: Prepare emulator smoke-test script
+      - name: Prepare emulator smoke test
         shell: bash
         run: |
           set -euo pipefail
 
+          mkdir -p smoke-test-results
+
           cat > smoke-test.sh <<'SMOKE_TEST'
-          #!/bin/sh
+          #!/bin/bash
 
-          set -eu
+          set -u
 
-          APK_PATH="${1:?Debug APK path was not supplied}"
+          APK_PATH="${1:?APK path missing}"
+          RESULTS="smoke-test-results"
+
+          mkdir -p "$RESULTS"
+
+          capture_diagnostics() {
+            echo "Capturing emulator diagnostics..."
+
+            timeout 20s adb devices -l \
+              > "$RESULTS/adb-devices.txt" 2>&1 || true
+
+            timeout 30s adb logcat -d -t 5000 \
+              > "$RESULTS/logcat.txt" 2>&1 || true
+
+            timeout 20s adb shell dumpsys activity activities \
+              > "$RESULTS/activities.txt" 2>&1 || true
+
+            timeout 20s adb shell dumpsys window windows \
+              > "$RESULTS/windows.txt" 2>&1 || true
+
+            timeout 20s adb shell pidof com.twinpower.andro \
+              > "$RESULTS/process-id.txt" 2>&1 || true
+
+            timeout 20s adb exec-out screencap -p \
+              > "$RESULTS/andro-screen.png" 2>/dev/null || true
+
+            adb pull /sdcard/andro-auth-screen.xml \
+              "$RESULTS/auth-screen.xml" \
+              > /dev/null 2>&1 || true
+
+            echo "Diagnostics capture completed."
+          }
+
+          trap capture_diagnostics EXIT
 
           if [ ! -s "$APK_PATH" ]; then
-            echo "Debug APK does not exist: $APK_PATH"
+            echo "APK is missing."
             exit 1
           fi
 
-          echo "Installing Andro debug APK..."
-
+          echo "Installing Andro..."
           adb install -r "$APK_PATH"
 
-          echo "Launching Andro authentication activity..."
-
           adb shell am force-stop com.twinpower.andro || true
+
+          echo "Launching authentication activity..."
 
           adb shell am start -W \
             -n com.twinpower.andro/.AuthGateActivity
 
-          echo "Allowing the authentication screen to initialize..."
-
           sleep 8
-
-          echo "Checking Andro application process..."
 
           PID="$(adb shell pidof com.twinpower.andro | tr -d '\r\n')"
 
           if [ -z "$PID" ]; then
-            echo "Andro application process is not running."
+            echo "Andro process is not running."
             exit 1
           fi
 
-          echo "Andro process is running: $PID"
-
-          echo "Checking foreground activity..."
+          echo "Andro process running: $PID"
 
           adb shell dumpsys activity activities \
-            > /tmp/andro-activities.txt
+            > "$RESULTS/activities.txt"
 
-          if ! grep -F 'AuthGateActivity' /tmp/andro-activities.txt; then
-            echo "AuthGateActivity was not found in activity diagnostics."
+          if ! grep -Fq 'AuthGateActivity' "$RESULTS/activities.txt"; then
+            echo "Authentication activity was not found."
             exit 1
           fi
-
-          echo "Correct launcher activity verified."
-
-          echo "Inspecting unauthenticated sign-in screen..."
 
           adb shell uiautomator dump \
             /sdcard/andro-auth-screen.xml
 
           adb pull /sdcard/andro-auth-screen.xml \
-            /tmp/andro-auth-screen.xml
+            "$RESULTS/auth-screen.xml"
 
-          UI="/tmp/andro-auth-screen.xml"
+          UI="$RESULTS/auth-screen.xml"
 
-          if ! grep -F 'ANDRO' "$UI"; then
-            echo "Andro application title was not found."
-            exit 1
-          fi
+          for EXPECTED in \
+            'ANDRO' \
+            'CUSTOMER ACCOUNT' \
+            'Your Android development environment' \
+            'Continue with GitHub' \
+            'Your GitHub account authenticates you to Andro'
+          do
+            if ! grep -Fq "$EXPECTED" "$UI"; then
+              echo "Expected UI text missing: $EXPECTED"
+              exit 1
+            fi
+          done
 
-          if ! grep -F 'CUSTOMER ACCOUNT' "$UI"; then
-            echo "Customer account section was not found."
-            exit 1
-          fi
-
-          if ! grep -F 'Your Android development environment' "$UI"; then
-            echo "Andro application description was not found."
-            exit 1
-          fi
-
-          if ! grep -F 'Continue with GitHub' "$UI"; then
-            echo "GitHub sign-in button was not found."
-            exit 1
-          fi
-
-          if ! grep -F 'Your GitHub account authenticates you to Andro' "$UI"; then
-            echo "Account security explanation was not found."
-            exit 1
-          fi
-
-          echo "Unauthenticated Andro sign-in screen verified."
-
-          echo "The test will not press the GitHub sign-in button."
-
-          echo "Removing test installation..."
+          echo "Andro authentication UI verified."
+          echo "GitHub sign-in was not activated."
 
           adb shell am force-stop com.twinpower.andro
           adb uninstall com.twinpower.andro
 
-          echo "Andro installation, launcher and authentication UI tests passed."
+          echo "Smoke test passed."
           SMOKE_TEST
 
           chmod +x smoke-test.sh
-
-          test -s smoke-test.sh
-
-          echo "Smoke-test script prepared."
 
       - name: Install, launch and inspect Andro
         uses: reactivecircus/android-emulator-runner@v2
@@ -365,55 +351,8 @@ jobs:
           emulator-boot-timeout: 300
           disable-linux-hw-accel: false
           disable-animations: true
-          emulator-options: ${{ steps.avd-cache.outputs.cache-hit == 'true' && '-no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none' || '-no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none' }}
-          script: sh smoke-test.sh "${{ steps.apk.outputs.path }}"
-
-      - name: Capture emulator diagnostics
-        if: always()
-        shell: bash
-        run: |
-          set +e
-
-          RESULTS="smoke-test-results"
-          mkdir -p "$RESULTS"
-
-          echo "Capturing emulator state..."
-
-          adb devices -l \
-            > "$RESULTS/adb-devices.txt" 2>&1
-
-          timeout 30s adb logcat -d -t 5000 \
-            > "$RESULTS/logcat.txt" 2>&1
-
-          timeout 20s adb shell dumpsys activity activities \
-            > "$RESULTS/activities.txt" 2>&1
-
-          timeout 20s adb shell dumpsys window windows \
-            > "$RESULTS/windows.txt" 2>&1
-
-          timeout 20s adb shell getprop \
-            > "$RESULTS/device-properties.txt" 2>&1
-
-          timeout 20s adb shell pidof com.twinpower.andro \
-            > "$RESULTS/process-id.txt" 2>&1
-
-          timeout 20s adb exec-out screencap -p \
-            > "$RESULTS/andro-screen.png" 2>/dev/null
-
-          adb pull /sdcard/andro-auth-screen.xml \
-            "$RESULTS/auth-screen.xml" \
-            > /dev/null 2>&1
-
-          emulator -list-avds \
-            > "$RESULTS/available-avds.txt" 2>&1
-
-          ps aux | grep -E '[e]mulator|[q]emu' \
-            > "$RESULTS/emulator-processes.txt"
-
-          ls -l /dev/kvm \
-            > "$RESULTS/kvm-status.txt" 2>&1
-
-          echo "Emulator diagnostic capture completed."
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash smoke-test.sh "${{ steps.apk.outputs.path }}"
 
       - name: Analyse emulator diagnostics
         if: always()
@@ -440,7 +379,7 @@ jobs:
             echo "## Automated checks"
           } > "$REPORT"
 
-          record_check() {
+          check_file() {
             LABEL="$1"
             FILE="$2"
             PATTERN="$3"
@@ -448,62 +387,50 @@ jobs:
             if [ -s "$FILE" ] && grep -Fq "$PATTERN" "$FILE"; then
               echo "- PASS — $LABEL" >> "$REPORT"
             else
-              echo "- WARNING — $LABEL (missing or not verified)" >> "$REPORT"
+              echo "- WARNING — $LABEL" >> "$REPORT"
               STATUS="WARNING"
               FINDINGS=$((FINDINGS + 1))
             fi
           }
 
-          record_check \
-            "Emulator ADB device detected" \
-            "$RESULTS/adb-devices.txt" \
-            "device"
+          check_file "ADB device detected" \
+            "$RESULTS/adb-devices.txt" "device"
 
-          record_check \
-            "Andro process recorded" \
-            "$RESULTS/process-id.txt" \
-            ""
-
-          if [ -s "$RESULTS/activities.txt" ] &&
-             grep -Fq 'AuthGateActivity' "$RESULTS/activities.txt"; then
-            echo "- PASS — Andro launcher activity observed" >> "$REPORT"
+          if [ -s "$RESULTS/process-id.txt" ] &&
+             grep -Eq '[0-9]+' "$RESULTS/process-id.txt"; then
+            echo "- PASS — Andro process ID recorded" >> "$REPORT"
           else
-            echo "- WARNING — Andro launcher activity not verified" >> "$REPORT"
+            echo "- WARNING — Andro process ID unavailable" >> "$REPORT"
             STATUS="WARNING"
             FINDINGS=$((FINDINGS + 1))
           fi
 
-          record_check \
-            "Andro UI hierarchy captured" \
-            "$RESULTS/auth-screen.xml" \
-            "ANDRO"
+          check_file "Launcher activity recorded" \
+            "$RESULTS/activities.txt" "AuthGateActivity"
 
-          record_check \
-            "Emulator screenshot captured" \
-            "$RESULTS/andro-screen.png" \
-            ""
+          check_file "Authentication UI captured" \
+            "$RESULTS/auth-screen.xml" "ANDRO"
 
-          record_check \
-            "KVM status recorded" \
-            "$RESULTS/kvm-status.txt" \
-            "/dev/kvm"
+          if [ -s "$RESULTS/andro-screen.png" ]; then
+            echo "- PASS — Emulator screenshot captured" >> "$REPORT"
+          else
+            echo "- WARNING — Emulator screenshot unavailable" >> "$REPORT"
+            STATUS="WARNING"
+            FINDINGS=$((FINDINGS + 1))
+          fi
 
           echo >> "$REPORT"
-          echo "## Application crash and ANR scan" >> "$REPORT"
+          echo "## Crash and ANR scan" >> "$REPORT"
 
           : > "$CRASHES"
 
           if [ -s "$RESULTS/logcat.txt" ]; then
-
-            grep -nEi -B 8 -A 12 \
-              'FATAL EXCEPTION|Fatal signal|ANR in' \
-              "$RESULTS/logcat.txt" |
-              grep -Ei \
-              'FATAL EXCEPTION|Fatal signal|ANR in|Process: com\.twinpower\.andro|>>> com\.twinpower\.andro <<<' \
-              > "$CRASHES"
+            grep -nEi \
+              'FATAL EXCEPTION|Fatal signal|ANR in .*com\.twinpower\.andro|Process: com\.twinpower\.andro' \
+              "$RESULTS/logcat.txt" > "$CRASHES" || true
 
             if [ -s "$CRASHES" ]; then
-              echo "- WARNING — Potential Andro crash or ANR signatures detected." >> "$REPORT"
+              echo "- WARNING — Potential Andro crash or ANR signatures found." >> "$REPORT"
               echo >> "$REPORT"
               echo '```text' >> "$REPORT"
               head -n 60 "$CRASHES" >> "$REPORT"
@@ -512,11 +439,10 @@ jobs:
               STATUS="WARNING"
               FINDINGS=$((FINDINGS + 1))
             else
-              echo "- PASS — No matching Andro crash or ANR signatures detected in captured logcat." >> "$REPORT"
+              echo "- PASS — No matching Andro crash signatures detected." >> "$REPORT"
             fi
-
           else
-            echo "- WARNING — Logcat unavailable; crash scan could not run." >> "$REPORT"
+            echo "- WARNING — Logcat unavailable; crash scan incomplete." >> "$REPORT"
             STATUS="WARNING"
             FINDINGS=$((FINDINGS + 1))
           fi
@@ -527,18 +453,12 @@ jobs:
             echo
             echo "**$STATUS** — $FINDINGS diagnostic warning(s)."
             echo
-            echo "This report analyses captured emulator evidence."
-            echo "A missing diagnostic file does not automatically mean the application crashed."
-            echo "A clean scan means no matching Andro crash signature was found in the captured logcat window."
-            echo
+            echo "The report analyses captured emulator evidence."
+            echo "A missing diagnostic file does not automatically indicate an application crash."
             echo "The GitHub sign-in button was not activated."
           } >> "$REPORT"
 
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          echo "Diagnostic analysis written to $REPORT"
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload emulator diagnostics
         if: always()
@@ -589,8 +509,8 @@ jobs:
             - Release APK build
             - APK archive validation
             - Android emulator installation
-            - Exported launcher activity verification
-            - Unauthenticated sign-in screen inspection
+            - Launcher activity verification
+            - Authentication screen inspection
 
             Note: The release APK is unsigned.
             The debug APK is signed with the Android debug key
