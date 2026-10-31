@@ -1,14 +1,11 @@
 
 package com.twinpower.andro
 
-import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
@@ -83,6 +80,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
     }
 
     var loading by remember { mutableStateOf(false) }
+
     var status by remember {
         mutableStateOf(
             "Connect GitHub in the GitHub Integration section first."
@@ -131,13 +129,18 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             runCatching {
                 withContext(Dispatchers.IO) {
-                    workflowManager.listWorkflows(parts.first, parts.second)
+                    workflowManager.listWorkflows(
+                        parts.first,
+                        parts.second
+                    )
                 }
             }.onSuccess { result ->
                 workflows = result
+
                 selectedWorkflow = result.firstOrNull {
                     it.state == "active"
                 }
+
                 status = if (result.isEmpty()) {
                     "No workflows found. Add a workflow with workflow_dispatch."
                 } else {
@@ -196,6 +199,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
         scope.launch {
             loading = true
+
             status = if (pull) {
                 "Pulling GitHub files into Andro..."
             } else {
@@ -322,6 +326,45 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         }
     }
 
+    fun downloadArtifact(artifact: GitHubArtifact) {
+        val project = selectedProject
+        val parts = repositoryParts()
+
+        if (project == null) {
+            status = "Select a local project before downloading an artifact."
+            return
+        }
+
+        if (parts == null) return
+
+        if (artifact.expired) {
+            status = "This GitHub artifact has expired and cannot be downloaded."
+            return
+        }
+
+        scope.launch {
+            loading = true
+            status = "Downloading ${artifact.name} from GitHub..."
+
+            runCatching {
+                orchestrator.downloadArtifact(
+                    project = project,
+                    owner = parts.first,
+                    repository = parts.second,
+                    artifact = artifact
+                )
+            }.onSuccess { downloadedFile ->
+                status =
+                    "Artifact downloaded and extracted successfully. " +
+                    "Project location: ${downloadedFile.absolutePath}"
+            }.onFailure {
+                status = it.message ?: "Artifact download failed."
+            }
+
+            loading = false
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (tokenProvider() == null) {
             status = "Connect GitHub above before using remote builds."
@@ -332,8 +375,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
@@ -349,7 +391,10 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             HorizontalDivider()
 
-            Text("LOCAL PROJECT", fontWeight = FontWeight.SemiBold)
+            Text(
+                "LOCAL PROJECT",
+                fontWeight = FontWeight.SemiBold
+            )
 
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
@@ -369,6 +414,8 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         onClick = {
                             selectedProject = project
                             projectMenu = false
+                            selectedRun = null
+                            artifacts = emptyList()
                         }
                     )
                 }
@@ -381,7 +428,10 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 )
             }
 
-            Text("GITHUB REPOSITORY", fontWeight = FontWeight.SemiBold)
+            Text(
+                "GITHUB REPOSITORY",
+                fontWeight = FontWeight.SemiBold
+            )
 
             OutlinedTextField(
                 value = owner,
@@ -439,14 +489,17 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             Text(
                 "Pull overwrites matching local files. It does not delete local files " +
-                    "that are absent from GitHub. Push commits files individually, " +
-                    "so a failed push may leave earlier files committed.",
+                    "that are absent from GitHub. Push uploads the project files and " +
+                    "creates a single GitHub commit.",
                 style = MaterialTheme.typography.bodySmall
             )
 
             HorizontalDivider()
 
-            Text("REMOTE ANDROID BUILD", fontWeight = FontWeight.SemiBold)
+            Text(
+                "REMOTE ANDROID BUILD",
+                fontWeight = FontWeight.SemiBold
+            )
 
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
@@ -511,7 +564,9 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     modifier = Modifier.weight(1f),
                     enabled = !loading && selectedRun != null,
                     onClick = {
-                        selectedRun?.let { refreshSelectedRun(it) }
+                        selectedRun?.let {
+                            refreshSelectedRun(it)
+                        }
                     }
                 ) {
                     Text("Refresh status")
@@ -559,21 +614,56 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             }
 
             if (artifacts.isNotEmpty()) {
+                HorizontalDivider()
+
                 Text(
                     "BUILD ARTIFACTS",
                     fontWeight = FontWeight.Bold
                 )
 
                 artifacts.forEach { artifact ->
-                    Text(
-                        "${artifact.name} · ${artifact.sizeBytes / 1024} KB" +
-                            if (artifact.expired) " · Expired" else ""
-                    )
+                    Card(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                artifact.name,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            Text(
+                                "${artifact.sizeBytes / 1024} KB" +
+                                    if (artifact.expired) " · Expired" else "",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+
+                            OutlinedButton(
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !loading &&
+                                    !artifact.expired &&
+                                    selectedProject != null,
+                                onClick = {
+                                    downloadArtifact(artifact)
+                                }
+                            ) {
+                                Text(
+                                    if (artifact.expired) {
+                                        "Artifact expired"
+                                    } else {
+                                        "Download into project"
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
 
                 Text(
-                    "Artifact download links are managed by GitHub and may require " +
-                        "an authenticated session.",
+                    "Downloaded artifacts are extracted under the selected project's " +
+                        "build/andro-artifacts directory.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
