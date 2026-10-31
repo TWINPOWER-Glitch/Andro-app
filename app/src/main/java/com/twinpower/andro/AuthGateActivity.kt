@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.handleDeeplinks
 import io.github.jan.supabase.auth.providers.Github
 import io.github.jan.supabase.auth.status.SessionStatus
@@ -72,6 +73,7 @@ private fun AndroAuthScreen() {
             when (status) {
                 is SessionStatus.Authenticated -> {
                     loading = false
+                    signingIn = false
                     message = "Account authenticated."
 
                     if (!navigated) {
@@ -94,6 +96,7 @@ private fun AndroAuthScreen() {
 
                 else -> {
                     loading = false
+
                     if (!signingIn) {
                         message = "Sign in to your Andro account."
                     }
@@ -158,10 +161,10 @@ private fun AndroAuthScreen() {
                                     AndroSupabase.client.auth.signInWith(
                                         Github
                                     )
-                                }.onFailure {
+                                }.onFailure { error ->
                                     signingIn = false
                                     message =
-                                        it.message
+                                        error.message
                                             ?: "GitHub sign-in could not start."
                                 }
                             }
