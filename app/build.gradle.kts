@@ -13,9 +13,10 @@ android {
         applicationId = "com.twinpower.andro"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionCode = 4
+        versionName = "0.4.0"
+        testInstrumentationRunner =
+            "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
@@ -51,7 +52,10 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2025.02.00"))
+    implementation(
+        platform("androidx.compose:compose-bom:2025.02.00")
+    )
+
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -59,14 +63,28 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
+
+    implementation(
+        "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1"
+    )
 
     implementation("io.ktor:ktor-server-core-jvm:3.1.3")
     implementation("io.ktor:ktor-server-cio-jvm:3.1.3")
-    implementation("io.ktor:ktor-server-content-negotiation-jvm:3.1.3")
-    implementation("io.ktor:ktor-serialization-kotlinx-json-jvm:3.1.3")
+    implementation(
+        "io.ktor:ktor-server-content-negotiation-jvm:3.1.3"
+    )
+    implementation(
+        "io.ktor:ktor-serialization-kotlinx-json-jvm:3.1.3"
+    )
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Supabase customer authentication
+    implementation(
+        platform("io.github.jan-tennert.supabase:bom:3.0.3")
+    )
+    implementation("io.github.jan-tennert.supabase:auth-kt")
+    implementation("io.ktor:ktor-client-android:3.1.3")
 
     testImplementation("junit:junit:4.13.2")
 
