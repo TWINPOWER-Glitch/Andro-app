@@ -377,7 +377,102 @@ jobs:
           disable-animations: true
           emulator-options: ${{ steps.avd-cache.outputs.cache-hit == 'true' && '-no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none' || '-no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none' }}
           script: sh smoke-test.sh "${{ steps.apk.outputs.path }}"
+      
+      - name: Analyse emulator diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
 
+          RESULTS="smoke-test-results"
+          mkdir -p "$RESULTS"
+          REPORT="$RESULTS/diagnostics-summary.md"
+          STATUS="PASS"
+          FINDINGS=0
+
+          {
+            echo "# Andro emulator diagnostics"
+            echo
+            echo "Run: $GITHUB_RUN_NUMBER"
+            echo "Commit: $GITHUB_SHA"
+            echo
+            echo "## Automated checks"
+          } > "$REPORT"
+
+          record_check() {
+            LABEL="$1"
+            FILE="$2"
+            PATTERN="$3"
+
+            if [ -s "$FILE" ] && grep -Fq "$PATTERN" "$FILE"; then
+              echo "- PASS — $LABEL" >> "$REPORT"
+            else
+              echo "- WARNING — $LABEL (missing or not verified)" >> "$REPORT"
+              STATUS="WARNING"
+              FINDINGS=$((FINDINGS + 1))
+            fi
+          }
+
+          if [ -s "$RESULTS/process-id.txt" ]; then
+            echo "- PASS — Application process ID recorded" >> "$REPORT"
+          else
+            echo "- WARNING — Application process ID missing" >> "$REPORT"
+            STATUS="WARNING"
+            FINDINGS=$((FINDINGS + 1))
+          fi
+
+          record_check "Launcher activity" "$RESULTS/activities.txt" "AuthGateActivity"
+          record_check "Andro UI hierarchy" "$RESULTS/auth-screen.xml" "ANDRO"
+          record_check "GitHub sign-in control" "$RESULTS/auth-screen.xml" "Continue with GitHub"
+          record_check "Account security explanation" "$RESULTS/auth-screen.xml" "Your GitHub account authenticates you to Andro"
+
+          if [ -s "$RESULTS/andro-screen.png" ]; then
+            echo "- PASS — Emulator screenshot captured" >> "$REPORT"
+          else
+            echo "- WARNING — Emulator screenshot missing" >> "$REPORT"
+            STATUS="WARNING"
+            FINDINGS=$((FINDINGS + 1))
+          fi
+
+          echo >> "$REPORT"
+          echo "## Crash and ANR scan" >> "$REPORT"
+
+          if [ -s "$RESULTS/logcat.txt" ]; then
+            grep -nEi 'FATAL EXCEPTION|Fatal signal|ANR in .*com\.twinpower\.andro' \
+              "$RESULTS/logcat.txt" > "$RESULTS/crash-signatures.txt"
+
+            if [ -s "$RESULTS/crash-signatures.txt" ]; then
+              echo "- WARNING — Crash/ANR signatures detected:" >> "$REPORT"
+              echo >> "$REPORT"
+              printf '%s\n' '~~~text' >> "$REPORT"
+              head -n 30 "$RESULTS/crash-signatures.txt" >> "$REPORT"
+              printf '%s\n' '~~~' >> "$REPORT"
+              STATUS="WARNING"
+              FINDINGS=$((FINDINGS + 1))
+            else
+              echo "- PASS — No matching fatal-exception, fatal-signal, or Andro ANR signatures found" >> "$REPORT"
+            fi
+          else
+            echo "- WARNING — Logcat unavailable; crash scan could not run" >> "$REPORT"
+            STATUS="WARNING"
+            FINDINGS=$((FINDINGS + 1))
+          fi
+
+          {
+            echo
+            echo "## Result"
+            echo
+            echo "**$STATUS** — $FINDINGS diagnostic warning(s)."
+            echo
+            echo "This report analyses captured evidence. It does not authenticate a user or interact with the GitHub sign-in control. A clean scan means no matching crash signature was found in the captured logcat window."
+          } >> "$REPORT"
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "Diagnostic analysis written to $REPORT"
+          
       - name: Upload emulator diagnostics
         if: always()
         uses: actions/upload-artifact@v4
