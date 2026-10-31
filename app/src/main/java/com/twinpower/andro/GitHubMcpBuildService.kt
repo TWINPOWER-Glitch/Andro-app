@@ -1,3 +1,4 @@
+
 package com.twinpower.andro
 
 import android.content.Context
@@ -6,12 +7,6 @@ import java.io.IOException
 /**
  * Secure bridge between Andro MCP build requests
  * and the GitHub Actions build orchestrator.
- *
- * The service:
- * 1. Resolves the requested local project.
- * 2. Loads that project's saved GitHub repository binding.
- * 3. Obtains the existing GitHub access token.
- * 4. Pushes the project and dispatches its configured workflow.
  *
  * Access tokens are never returned to MCP clients.
  */
@@ -116,6 +111,51 @@ class GitHubMcpBuildService(
                 workflowId = binding.workflowId,
                 commitMessage = commitMessage.trim()
             )
+        )
+    }
+
+    /**
+     * Retrieves the actual GitHub Actions status for a run.
+     *
+     * The repository is resolved from the project's saved binding.
+     * The caller cannot supply an arbitrary repository.
+     *
+     * Successful completed runs also return their available artifacts.
+     */
+    suspend fun getRemoteBuildStatus(
+        projectId: String,
+        runId: Long
+    ): RemoteBuildStatus {
+
+        require(projectId.isNotBlank()) {
+            "Project ID is required."
+        }
+
+        require(runId > 0) {
+            "A valid GitHub Actions run ID is required."
+        }
+
+        // Confirm that this project exists in Andro's workspace.
+        repository.getProject(projectId)
+
+        // Resolve the repository exclusively from the saved binding.
+        val binding = bindingStore.get(projectId)
+            ?: throw IOException(
+                "This project has no saved GitHub repository configuration."
+            )
+
+        // Use the existing secure GitHub token store.
+        val token = tokenProvider()
+            ?.takeIf { it.isNotBlank() }
+            ?: throw IOException(
+                "GitHub is not connected. Authenticate before checking remote build status."
+            )
+
+        // Query GitHub Actions for the real run status.
+        return createOrchestrator(token).refreshStatus(
+            owner = binding.owner,
+            repository = binding.repository,
+            runId = runId
         )
     }
 
