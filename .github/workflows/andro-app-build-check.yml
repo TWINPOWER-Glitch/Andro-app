@@ -1,3 +1,4 @@
+
 name: Andro Android CI, APK Tests and Releases
 
 on:
@@ -244,7 +245,10 @@ jobs:
           mkdir -p "$RESULTS"
 
           capture_diagnostics() {
-            echo "Capturing emulator diagnostics..."
+            TEST_EXIT_CODE=$?
+            trap - EXIT
+
+            echo "Capturing emulator diagnostics before cleanup..."
 
             timeout 20s adb devices -l \
               > "$RESULTS/adb-devices.txt" 2>&1 || true
@@ -264,11 +268,25 @@ jobs:
             timeout 20s adb exec-out screencap -p \
               > "$RESULTS/andro-screen.png" 2>/dev/null || true
 
+            timeout 20s adb shell uiautomator dump \
+              /sdcard/andro-auth-screen.xml \
+              > "$RESULTS/uiautomator-dump.txt" 2>&1 || true
+
             adb pull /sdcard/andro-auth-screen.xml \
               "$RESULTS/auth-screen.xml" \
               > /dev/null 2>&1 || true
 
             echo "Diagnostics capture completed."
+
+            echo "Cleaning up Andro after diagnostics..."
+
+            timeout 20s adb shell am force-stop com.twinpower.andro \
+              > "$RESULTS/cleanup-force-stop.txt" 2>&1 || true
+
+            timeout 30s adb uninstall com.twinpower.andro \
+              > "$RESULTS/cleanup-uninstall.txt" 2>&1 || true
+
+            return "$TEST_EXIT_CODE"
           }
 
           trap capture_diagnostics EXIT
@@ -331,10 +349,7 @@ jobs:
           echo "Andro authentication UI verified."
           echo "GitHub sign-in was not activated."
 
-          adb shell am force-stop com.twinpower.andro
-          adb uninstall com.twinpower.andro
-
-          echo "Smoke test passed."
+          echo "Smoke test passed. Diagnostics will be captured before cleanup by the EXIT trap."
           SMOKE_TEST
 
           chmod +x smoke-test.sh
