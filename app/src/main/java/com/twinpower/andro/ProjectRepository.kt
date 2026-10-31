@@ -1,3 +1,4 @@
+
 package com.twinpower.andro
 
 import android.content.Context
@@ -73,7 +74,7 @@ class ProjectRepository(private val context: Context) {
                     id = id,
                     name = safeName,
                     rootPath = destination.absolutePath,
-                    hasGradleWrapper = false
+                    hasGradleWrapper = File(destination, "gradlew").exists()
                 )
             } catch (error: Exception) {
                 destination.deleteRecursively()
@@ -90,6 +91,10 @@ class ProjectRepository(private val context: Context) {
 
             val source = DocumentFile.fromTreeUri(context, treeUri)
                 ?: error("Could not open selected directory.")
+
+            require(source.isDirectory) {
+                "The selected location is not a directory."
+            }
 
             val id = UUID.randomUUID().toString()
             val safeName = source.name
@@ -114,10 +119,10 @@ class ProjectRepository(private val context: Context) {
                     .writeText(metadata.toString(), Charsets.UTF_8)
 
                 ProjectInfo(
-                    id,
-                    safeName,
-                    destination.absolutePath,
-                    File(destination, "gradlew").exists()
+                    id = id,
+                    name = safeName,
+                    rootPath = destination.absolutePath,
+                    hasGradleWrapper = File(destination, "gradlew").exists()
                 )
             } catch (error: Exception) {
                 destination.deleteRecursively()
@@ -278,11 +283,11 @@ class ProjectRepository(private val context: Context) {
             "Invalid project ID."
         }
 
-        val dir = File(projectsDir, projectId).canonicalFile
+        val root = projectsDir.canonicalFile
+        val dir = File(root, projectId).canonicalFile
 
         require(
-            dir.parentFile == projectsDir.canonicalFile &&
-                dir.isDirectory
+            dir.parentFile == root && dir.isDirectory
         ) {
             "Project not found."
         }
@@ -358,12 +363,9 @@ class ProjectRepository(private val context: Context) {
 
         val file = resolveProjectFile(projectId, relativePath)
         val parent = file.parentFile
+            ?: error("Invalid file destination.")
 
-        check(
-            parent == null ||
-                parent.exists() ||
-                parent.mkdirs()
-        ) {
+        check(parent.exists() || parent.mkdirs()) {
             "Could not create parent directory."
         }
 
@@ -372,21 +374,46 @@ class ProjectRepository(private val context: Context) {
             ".${file.name}.${UUID.randomUUID()}.tmp"
         )
 
+        val backup = File(
+            parent,
+            ".${file.name}.${UUID.randomUUID()}.bak"
+        )
+
         try {
             FileOutputStream(temporary).use { output ->
                 output.write(content)
                 output.fd.sync()
             }
 
-            if (file.exists() && !file.delete()) {
-                error("Could not replace existing file.")
+            if (file.exists()) {
+                check(file.isFile) {
+                    "The destination exists and is not a file."
+                }
+
+                check(file.renameTo(backup)) {
+                    "Could not preserve the existing file."
+                }
             }
 
             if (!temporary.renameTo(file)) {
+                if (backup.exists()) {
+                    backup.renameTo(file)
+                }
+
                 error("Could not move the completed file into place.")
             }
+
+            backup.delete()
         } finally {
             temporary.delete()
+
+            if (backup.exists() && !file.exists()) {
+                backup.renameTo(file)
+            }
+
+            if (backup.exists() && file.exists()) {
+                backup.delete()
+            }
         }
     }
 
@@ -418,13 +445,26 @@ class ProjectRepository(private val context: Context) {
             relativePath
         )
 
-        file.parentFile?.mkdirs()
+        val parent = file.parentFile
+            ?: error("Invalid file destination.")
+
+        check(parent.exists() || parent.mkdirs()) {
+            "Could not create parent directory."
+        }
 
         check(file.createNewFile()) {
             "File already exists or could not be created."
         }
 
-        file.writeText(content, Charsets.UTF_8)
+        try {
+            FileOutputStream(file).use { output ->
+                output.write(content.toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+        } catch (error: Exception) {
+            file.delete()
+            throw error
+        }
     }
 
     fun deleteEntry(
@@ -514,6 +554,8 @@ class ProjectRepository(private val context: Context) {
             "Could not create destination directory."
         }
 
+        val canonicalDestination = destination.canonicalFile
+
         source.listFiles().forEach { child ->
             val name = child.name ?: return@forEach
 
@@ -521,7 +563,22 @@ class ProjectRepository(private val context: Context) {
                 return@forEach
             }
 
-            val target = File(destination, name)
+            require(
+                name != "." &&
+                    name != ".." &&
+                    !name.contains('/') &&
+                    !name.contains('\\')
+            ) {
+                "Imported entry has an invalid name."
+            }
+
+            val target = File(destination, name).canonicalFile
+
+            require(
+                target.parentFile == canonicalDestination
+            ) {
+                "Imported entry escapes the destination directory."
+            }
 
             if (child.isDirectory) {
                 copyTree(child, target)
