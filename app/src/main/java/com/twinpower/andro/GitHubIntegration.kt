@@ -63,7 +63,7 @@ private data class GitHubEntry(
     val size: Long
 )
 
-private object GitHubSecureStore {
+internal object GitHubSecureStore {
     private const val PREFS = "andro_github_secure"
     private const val TOKEN = "encrypted_token"
     private const val PENDING = "encrypted_pending_auth"
