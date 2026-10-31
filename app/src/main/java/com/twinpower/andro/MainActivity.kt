@@ -28,7 +28,19 @@ class MainActivity : ComponentActivity() {
 
         val repository = ProjectRepository(applicationContext)
         val builds = BuildManager(applicationContext, repository)
-        val mcp = AndroMcpServer(repository, builds)
+
+        // Shared GitHub build bridge for MCP requests.
+        // The bridge reads credentials from GitHubSecureStore.
+        val githubBuilds = GitHubMcpBuildService(
+            applicationContext,
+            repository
+        )
+
+        val mcp = AndroMcpServer(
+            repository,
+            builds,
+            githubBuilds
+        )
 
         setContent {
             AndroApp(
