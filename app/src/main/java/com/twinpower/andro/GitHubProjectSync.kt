@@ -1,4 +1,3 @@
-
 package com.twinpower.andro
 
 import android.util.Base64
@@ -32,14 +31,28 @@ class GitHubProjectSync(
         tokenProvider()?.trim()?.takeIf { it.isNotEmpty() }
             ?: throw IOException("GitHub is not connected.")
 
-    private fun validate(owner: String, repo: String, branch: String) {
-        require(owner.matches(Regex("[A-Za-z0-9_.-]{1,100}"))) {
+    private fun validate(
+        owner: String,
+        repo: String,
+        branch: String
+    ) {
+        require(
+            owner.matches(Regex("[A-Za-z0-9_.-]{1,100}"))
+        ) {
             "Invalid GitHub owner."
         }
-        require(repo.matches(Regex("[A-Za-z0-9_.-]{1,100}"))) {
+
+        require(
+            repo.matches(Regex("[A-Za-z0-9_.-]{1,100}"))
+        ) {
             "Invalid repository name."
         }
-        require(branch.isNotBlank() && branch.length <= 255) {
+
+        require(
+            branch.isNotBlank() &&
+                branch.length <= 255 &&
+                !branch.contains('\n')
+        ) {
             "Invalid branch."
         }
     }
@@ -56,18 +69,22 @@ class GitHubProjectSync(
             connection.requestMethod = method
             connection.connectTimeout = 20000
             connection.readTimeout = 45000
+
             connection.setRequestProperty(
                 "Authorization",
                 "Bearer ${token()}"
             )
+
             connection.setRequestProperty(
                 "Accept",
                 "application/vnd.github+json"
             )
+
             connection.setRequestProperty(
                 "X-GitHub-Api-Version",
                 "2022-11-28"
             )
+
             connection.setRequestProperty(
                 "User-Agent",
                 "Andro-Android-App"
@@ -75,32 +92,41 @@ class GitHubProjectSync(
 
             if (body != null) {
                 connection.doOutput = true
+
                 connection.setRequestProperty(
                     "Content-Type",
                     "application/json; charset=utf-8"
                 )
+
                 connection.outputStream.use {
-                    it.write(body.toString().toByteArray(Charsets.UTF_8))
+                    it.write(
+                        body.toString()
+                            .toByteArray(Charsets.UTF_8)
+                    )
                 }
             }
 
             val status = connection.responseCode
+
             val stream = if (status in 200..299) {
                 connection.inputStream
             } else {
                 connection.errorStream
             }
 
-            val response = stream?.bufferedReader()?.use {
-                it.readText()
-            }.orEmpty()
+            val response = stream
+                ?.bufferedReader()
+                ?.use { it.readText() }
+                .orEmpty()
 
             if (status !in 200..299) {
                 val detail = runCatching {
-                    JSONObject(response).optString("message")
+                    JSONObject(response)
+                        .optString("message")
+                        .ifBlank { response }
                 }.getOrDefault(response)
 
-                throw IOException("GitHub HTTP $status: $detail")
+                throw GitHubApiException(status, detail)
             }
 
             return response
@@ -110,26 +136,63 @@ class GitHubProjectSync(
     }
 
     private fun encode(value: String): String =
-        URLEncoder.encode(value, Charsets.UTF_8.name())
+        URLEncoder.encode(
+            value,
+            Charsets.UTF_8.name()
+        ).replace("+", "%20")
 
-    private fun repoPath(owner: String, repo: String) =
-        "/repos/$owner/$repo"
+    private fun repoPath(
+        owner: String,
+        repo: String
+    ) = "/repos/$owner/$repo"
 
-    /**
-     * Pulls the selected GitHub branch into the local Andro project.
-     *
-     * Existing local files with matching paths are overwritten.
-     * Files absent from GitHub are not deleted locally.
-     */
+    private fun shouldSync(path: String): Boolean {
+        if (
+            path.isBlank() ||
+            path == ".andro-project.json"
+        ) {
+            return false
+        }
+
+        val segments = path.split("/")
+
+        return segments.none {
+            it == ".git" ||
+                it == ".gradle" ||
+                it == "build"
+        }
+    }
+
+    private fun validatePath(path: String) {
+        require(
+            !path.startsWith("/") &&
+                !path.contains('\\')
+        ) {
+            "Unsafe repository path: $path"
+        }
+
+        require(
+            path.split("/").none {
+                it.isBlank() ||
+                    it == "." ||
+                    it == ".."
+            }
+        ) {
+            "Unsafe repository path: $path"
+        }
+    }
+
     suspend fun pull(
         project: ProjectInfo,
         owner: String,
         repo: String,
         branch: String
     ): GitHubSyncResult = withContext(Dispatchers.IO) {
+
         validate(owner, repo, branch)
 
         val root = repoPath(owner, repo)
+
         val branchInfo = JSONObject(
             api("$root/branches/${encode(branch)}")
         )
@@ -159,50 +222,58 @@ class GitHubProjectSync(
         val tree = treeResponse.optJSONArray("tree")
             ?: JSONArray()
 
+        val eligible = (0 until tree.length())
+            .map {
+                tree.getJSONObject(it)
+            }
+            .filter {
+                it.optString("type") == "blob" &&
+                    shouldSync(it.optString("path"))
+            }
+
+        if (eligible.size > MAX_FILES) {
+            throw IOException(
+                "Project exceeds the $MAX_FILES file sync limit."
+            )
+        }
+
         var processed = 0
 
-        for (index in 0 until tree.length()) {
-            val item = tree.getJSONObject(index)
-
-            if (item.optString("type") != "blob") continue
-
+        for (item in eligible) {
             val path = item.optString("path")
-            val size = item.optLong("size")
 
-            if (path.isBlank()) continue
-            if (path == ".andro-project.json") continue
-            if (path.startsWith(".git/")) continue
-            if (path.startsWith(".gradle/")) continue
-            if (path.split("/").any {
-                    it == "build" || it == ".git"
-                }) continue
+            validatePath(path)
 
-            require(!path.startsWith("/") && !path.contains("\\") &&
-                path.split("/").none {
-                    it.isBlank() || it == "." || it == ".."
-                }) {
-                "Unsafe repository path: $path"
+            val size = item.optLong("size", -1L)
+
+            if (size < 0L) {
+                throw IOException(
+                    "GitHub did not provide a valid size for $path"
+                )
             }
 
             if (size > MAX_FILE_SIZE) {
-                continue
-            }
-
-            if (processed >= MAX_FILES) {
                 throw IOException(
-                    "Project exceeds the $MAX_FILES file sync limit."
+                    "File exceeds the 512 KB sync limit: $path"
                 )
             }
 
             val blobSha = item.optString("sha")
-            if (blobSha.isBlank()) continue
+
+            if (blobSha.isBlank()) {
+                throw IOException(
+                    "Missing GitHub blob SHA for $path"
+                )
+            }
 
             val blob = JSONObject(
                 api("$root/git/blobs/$blobSha")
             )
 
-            require(blob.optString("encoding") == "base64") {
-                "Unsupported GitHub blob encoding for $path."
+            if (blob.optString("encoding") != "base64") {
+                throw IOException(
+                    "Unsupported GitHub blob encoding for $path."
+                )
             }
 
             val encoded = blob.optString("content")
@@ -210,18 +281,28 @@ class GitHubProjectSync(
                 .replace("\\r", "")
                 .filterNot { it.isWhitespace() }
 
-            val bytes = Base64.decode(encoded, Base64.DEFAULT)
-
-            require(bytes.size <= MAX_FILE_SIZE) {
-                "File exceeds the 512 KB limit: $path"
+            val bytes = try {
+                Base64.decode(
+                    encoded,
+                    Base64.DEFAULT
+                )
+            } catch (error: IllegalArgumentException) {
+                throw IOException(
+                    "Invalid Base64 content returned for $path",
+                    error
+                )
             }
 
-            val content = String(bytes, Charsets.UTF_8)
+            if (bytes.size > MAX_FILE_SIZE) {
+                throw IOException(
+                    "File exceeds the 512 KB sync limit: $path"
+                )
+            }
 
-            repository.writeFile(
+            repository.writeFileBytes(
                 project.id,
                 path,
-                content
+                bytes
             )
 
             processed++
@@ -235,13 +316,6 @@ class GitHubProjectSync(
         )
     }
 
-    /**
-     * Pushes local project files to the selected GitHub branch.
-     *
-     * Each file is committed independently through GitHub's Contents API.
-     * The operation is not atomic: if one file fails, earlier files remain
-     * committed and the exception identifies the failed operation.
-     */
     suspend fun push(
         project: ProjectInfo,
         owner: String,
@@ -249,21 +323,16 @@ class GitHubProjectSync(
         branch: String,
         commitMessage: String
     ): GitHubSyncResult = withContext(Dispatchers.IO) {
+
         validate(owner, repo, branch)
 
         require(commitMessage.isNotBlank()) {
             "A commit message is required."
         }
 
-        val files = repository.listFiles(project.id)
-            .filter { path ->
-                path != ".andro-project.json" &&
-                    !path.startsWith(".git/") &&
-                    !path.startsWith(".gradle/") &&
-                    path.split("/").none {
-                        it == "build" || it == ".git"
-                    }
-            }
+        val files = repository
+            .listFiles(project.id)
+            .filter(::shouldSync)
 
         if (files.size > MAX_FILES) {
             throw IOException(
@@ -271,45 +340,58 @@ class GitHubProjectSync(
             )
         }
 
-        var processed = 0
         val root = repoPath(owner, repo)
 
+        var processed = 0
+
         for (path in files) {
-            require(!path.startsWith("/") && !path.contains("\\") &&
-                path.split("/").none {
-                    it.isBlank() || it == "." || it == ".."
-                }) {
-                "Unsafe local project path: $path"
-            }
+            validatePath(path)
 
-            val content = repository.readFile(project.id, path)
-            val bytes = content.toByteArray(Charsets.UTF_8)
+            val bytes = repository.readFileBytes(
+                project.id,
+                path
+            )
 
-            require(bytes.size <= MAX_FILE_SIZE) {
-                "File exceeds the 512 KB push limit: $path"
+            if (bytes.size > MAX_FILE_SIZE) {
+                throw IOException(
+                    "File exceeds the 512 KB push limit: $path"
+                )
             }
 
             val encodedPath = path.split("/")
-                .joinToString("/") { encode(it) }
+                .joinToString("/") {
+                    encode(it)
+                }
 
-            val existing = runCatching {
+            val existingSha = try {
                 JSONObject(
                     api(
                         "$root/contents/$encodedPath?ref=${encode(branch)}"
                     )
-                ).optString("sha")
-            }.getOrNull()
+                )
+                    .optString("sha")
+                    .takeIf { it.isNotBlank() }
+            } catch (error: GitHubApiException) {
+                if (error.statusCode == 404) {
+                    null
+                } else {
+                    throw error
+                }
+            }
 
             val payload = JSONObject()
                 .put("message", commitMessage)
                 .put(
                     "content",
-                    Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    Base64.encodeToString(
+                        bytes,
+                        Base64.NO_WRAP
+                    )
                 )
                 .put("branch", branch)
 
-            if (!existing.isNullOrBlank()) {
-                payload.put("sha", existing)
+            if (existingSha != null) {
+                payload.put("sha", existingSha)
             }
 
             api(
@@ -328,4 +410,11 @@ class GitHubProjectSync(
             message = "Pushed $processed files to $owner/$repo ($branch)."
         )
     }
+
+    private class GitHubApiException(
+        val statusCode: Int,
+        message: String
+    ) : IOException(
+        "GitHub HTTP $statusCode: $message"
+    )
 }
