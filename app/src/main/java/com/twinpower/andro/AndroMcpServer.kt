@@ -11,6 +11,9 @@ import io.ktor.http.*
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 
 class AndroMcpServer(
     private val projects: ProjectRepository,
@@ -20,6 +23,52 @@ class AndroMcpServer(
 
     @Volatile
     private var server: io.ktor.server.engine.EmbeddedServer<*, *>? = null
+
+    /*
+     * A fresh cryptographically random token is generated for this
+     * server instance. It is never returned through HTTP responses.
+     *
+     * Internal Andro components can obtain it through
+     * localAuthorizationToken() when making trusted local requests.
+     */
+    private val accessToken: String = ByteArray(32)
+        .also { SecureRandom().nextBytes(it) }
+        .let {
+            Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(it)
+        }
+
+    /**
+     * Provides the local bearer token to trusted application
+     * components, such as CloudflareMcpRelay.
+     *
+     * Do not log this value or expose it through an unauthenticated
+     * HTTP endpoint.
+     */
+    fun localAuthorizationToken(): String {
+        return accessToken
+    }
+
+    /**
+     * Validates the Authorization header using constant-time
+     * comparison to reduce timing-based token disclosure.
+     */
+    private fun isAuthorized(
+        authorizationHeader: String?
+    ): Boolean {
+
+        if (authorizationHeader.isNullOrBlank()) {
+            return false
+        }
+
+        val expected = "Bearer $accessToken"
+
+        return MessageDigest.isEqual(
+            expected.toByteArray(Charsets.UTF_8),
+            authorizationHeader.toByteArray(Charsets.UTF_8)
+        )
+    }
 
     @Synchronized
     fun start() {
@@ -33,9 +82,25 @@ class AndroMcpServer(
             routing {
 
                 post("/mcp") {
+
+                    // Reject unauthenticated requests before parsing
+                    // or processing their contents.
+                    if (!isAuthorized(
+                            call.request.headers[
+                                HttpHeaders.Authorization
+                            ]
+                        )
+                    ) {
+                        call.respond(
+                            HttpStatusCode.Unauthorized
+                        )
+                        return@post
+                    }
+
                     val request = runCatching {
                         JSONObject(call.receiveText())
                     }.getOrElse {
+
                         call.respondText(
                             error(
                                 null,
@@ -45,16 +110,54 @@ class AndroMcpServer(
                             ContentType.Application.Json,
                             HttpStatusCode.BadRequest
                         )
+
+                        return@post
+                    }
+
+                    // Validate the JSON-RPC protocol version.
+                    if (request.optString("jsonrpc") != "2.0") {
+                        call.respondText(
+                            error(
+                                request.opt("id"),
+                                -32600,
+                                "Invalid JSON-RPC request."
+                            ).toString(),
+                            ContentType.Application.Json,
+                            HttpStatusCode.BadRequest
+                        )
+
                         return@post
                     }
 
                     val method = request.optString("method")
                     val id = request.opt("id")
-                    val params =
-                        request.optJSONObject("params") ?: JSONObject()
 
+                    if (method.isBlank()) {
+                        call.respondText(
+                            error(
+                                id,
+                                -32600,
+                                "A valid method is required."
+                            ).toString(),
+                            ContentType.Application.Json,
+                            HttpStatusCode.BadRequest
+                        )
+
+                        return@post
+                    }
+
+                    val params =
+                        request.optJSONObject("params")
+                            ?: JSONObject()
+
+                    /*
+                     * JSON-RPC notifications do not receive
+                     * JSON-RPC response objects.
+                     */
                     if (method.startsWith("notifications/")) {
-                        call.respond(HttpStatusCode.Accepted)
+                        call.respond(
+                            HttpStatusCode.Accepted
+                        )
                         return@post
                     }
 
@@ -77,8 +180,14 @@ class AndroMcpServer(
                                 .put(
                                     "serverInfo",
                                     JSONObject()
-                                        .put("name", "andro-local")
-                                        .put("version", "0.6.0")
+                                        .put(
+                                            "name",
+                                            "andro-local"
+                                        )
+                                        .put(
+                                            "version",
+                                            "0.6.0"
+                                        )
                                 )
                         )
 
@@ -113,13 +222,29 @@ class AndroMcpServer(
                     )
                 }
 
+                /*
+                 * Health information is intentionally public.
+                 * It reveals no credentials or project data.
+                 */
                 get("/health") {
                     call.respondText(
                         JSONObject()
-                            .put("service", "andro-local-mcp")
-                            .put("status", "ok")
-                            .put("buildEngine", "github-actions")
-                            .put("mcpVersion", "0.6.0")
+                            .put(
+                                "service",
+                                "andro-local-mcp"
+                            )
+                            .put(
+                                "status",
+                                "ok"
+                            )
+                            .put(
+                                "buildEngine",
+                                "github-actions"
+                            )
+                            .put(
+                                "mcpVersion",
+                                "0.6.0"
+                            )
                             .toString(),
                         ContentType.Application.Json
                     )
@@ -217,7 +342,10 @@ class AndroMcpServer(
         required.forEach { name ->
             props.put(
                 name,
-                JSONObject().put("type", "string")
+                JSONObject().put(
+                    "type",
+                    "string"
+                )
             )
         }
 
@@ -251,7 +379,10 @@ class AndroMcpServer(
         return JSONObject()
             .put("type", "object")
             .put("properties", properties)
-            .put("required", JSONArray().put("projectId"))
+            .put(
+                "required",
+                JSONArray().put("projectId")
+            )
     }
 
     private fun remoteBuildStatusSchema(): JSONObject {
@@ -294,7 +425,8 @@ class AndroMcpServer(
         val name = params.optString("name")
 
         val args =
-            params.optJSONObject("arguments") ?: JSONObject()
+            params.optJSONObject("arguments)
+                ?: JSONObject()
 
         return try {
 
@@ -350,7 +482,10 @@ class AndroMcpServer(
                         .put("path", path)
                         .put(
                             "content",
-                            projects.readFile(projectId, path)
+                            projects.readFile(
+                                projectId,
+                                path
+                            )
                         )
                 }
 
@@ -365,14 +500,11 @@ class AndroMcpServer(
                         "Build Android project with Andro"
                     }
 
-                    // First push the project and submit the workflow dispatch.
                     val dispatch = githubBuilds.buildProject(
                         projectId = projectId,
                         commitMessage = commitMessage
                     )
 
-                    // GitHub's dispatch endpoint does not return a run ID.
-                    // Locate the run created by this dispatch.
                     var locatedRun: GitHubWorkflowRun? = null
                     var runLookupError: String? = null
 
@@ -384,10 +516,9 @@ class AndroMcpServer(
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        // Dispatch has already succeeded. A lookup failure
-                        // must not be reported as a failed dispatch.
                         runLookupError =
-                            e.message ?: "The workflow run is not visible yet."
+                            e.message
+                                ?: "The workflow run is not visible yet."
                     }
 
                     JSONObject()
@@ -549,6 +680,8 @@ class AndroMcpServer(
                 )
             )
 
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
 
             result(
