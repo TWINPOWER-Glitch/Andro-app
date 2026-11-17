@@ -1,7 +1,6 @@
 
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-
     <!-- Deny unencrypted HTTP connections by default. -->
     <base-config cleartextTrafficPermitted="false" />
 
@@ -9,5 +8,4 @@
     <domain-config cleartextTrafficPermitted="true">
         <domain>127.0.0.1</domain>
     </domain-config>
-
 </network-security-config>
