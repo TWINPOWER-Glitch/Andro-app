@@ -516,13 +516,35 @@ class CloudflareMcpRelay(
 
             val request = Request.Builder()
                 .url("http://127.0.0.1:8765/mcp")
+                .header(
+                    "Authorization",
+                    "Bearer ${localMcp.localAuthorizationToken()}"
+                )
                 .post(localBody)
                 .build()
 
             client.newCall(request).execute().use { response ->
                 val raw = response.body?.string().orEmpty()
 
-                if (raw.isBlank()) {
+                if (!response.isSuccessful) {
+                    val message = when (response.code) {
+                        401 -> "Local MCP authorization failed."
+                        else -> "Local MCP endpoint returned HTTP ${response.code}."
+                    }
+
+                    JSONObject()
+                        .put("jsonrpc", "2.0")
+                        .put(
+                            "id",
+                            mcpRequest.opt("id") ?: JSONObject.NULL
+                        )
+                        .put(
+                            "error",
+                            JSONObject()
+                                .put("code", -32603)
+                                .put("message", message)
+                        )
+                } else if (raw.isBlank()) {
                     JSONObject()
                 } else {
                     JSONObject(raw)
