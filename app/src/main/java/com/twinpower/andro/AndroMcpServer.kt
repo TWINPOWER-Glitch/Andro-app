@@ -425,7 +425,7 @@ class AndroMcpServer(
         val name = params.optString("name")
 
         val args =
-            params.optJSONObject("arguments)
+            params.optJSONObject("arguments")
                 ?: JSONObject()
 
         return try {
