@@ -42,9 +42,8 @@ class MainActivity : ComponentActivity() {
         )
 
         setContent {
-            AndroApp(
+            AndroClientApp(
                 repository = repository,
-                builds = builds,
                 mcp = mcp
             )
         }
