@@ -760,6 +760,66 @@ class ProjectRepository(private val context: Context) {
             "Could not delete project entry."
         }
     }
+    
+    fun renameEntry(
+        projectId: String,
+        relativePath: String,
+        newName: String
+    ) {
+        require(relativePath != ".andro-project.json") {
+            "Project metadata cannot be renamed."
+        }
+
+        val source = resolveProjectFile(
+            projectId,
+            relativePath
+        )
+
+        check(source.exists()) {
+            "Project entry not found."
+        }
+
+        val safeName = newName.trim()
+
+        require(safeName.length in 1..120) {
+            "The new name must contain 1–120 characters."
+        }
+
+        require(
+            safeName != "." &&
+                safeName != ".." &&
+                '/' !in safeName &&
+                '\\' !in safeName &&
+                '\u0000' !in safeName &&
+                safeName != ".andro-project.json"
+        ) {
+            "Invalid entry name."
+        }
+
+        val root = projectDir(projectId).canonicalFile
+        val parent = source.parentFile?.canonicalFile
+            ?: error("Invalid project entry location.")
+
+        val destination = File(parent, safeName).canonicalFile
+
+        require(destination.parentFile == parent) {
+            "The new entry must remain in its current directory."
+        }
+
+        require(
+            destination.path.startsWith(root.path + File.separator)
+        ) {
+            "Destination escapes the project directory."
+        }
+
+        check(!destination.exists()) {
+            "An entry with that name already exists."
+        }
+
+        check(source.renameTo(destination)) {
+            "Could not rename project entry."
+        }
+    }
 
     fun getProject(projectId: String): ProjectInfo =
         readProjectInfo(projectDir(projectId))
