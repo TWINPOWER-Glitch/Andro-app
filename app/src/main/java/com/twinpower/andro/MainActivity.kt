@@ -100,6 +100,27 @@ private fun AndroApp(
     var showCreateDirectory by remember {
         mutableStateOf(false)
     }
+    
+    var showRenameEntry by remember {
+        mutableStateOf(false)
+    }
+
+    var showDeleteEntry by remember {
+        mutableStateOf(false)
+    }
+
+    var entryPath by remember {
+        mutableStateOf("")
+    }
+
+    var newEntryName by remember {
+        mutableStateOf("")
+    }
+
+    var fileMenuPath by remember {
+        mutableStateOf<String?>(null)
+    }
+
 
     var showEditor by remember {
         mutableStateOf(false)
