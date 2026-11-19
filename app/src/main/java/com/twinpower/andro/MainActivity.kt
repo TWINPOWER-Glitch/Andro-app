@@ -1,4 +1,3 @@
-
 package com.twinpower.andro
 
 import android.os.Bundle
@@ -100,7 +99,7 @@ private fun AndroApp(
     var showCreateDirectory by remember {
         mutableStateOf(false)
     }
-    
+
     var showRenameEntry by remember {
         mutableStateOf(false)
     }
@@ -120,7 +119,6 @@ private fun AndroApp(
     var fileMenuPath by remember {
         mutableStateOf<String?>(null)
     }
-
 
     var showEditor by remember {
         mutableStateOf(false)
@@ -710,28 +708,7 @@ private fun AndroApp(
                                     key = { it }
                                 ) { path ->
 
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable {
-                                                scope.launch {
-                                                    runCatching {
-                                                        repository.readFile(
-                                                            selected!!.id,
-                                                            path
-                                                        )
-                                                    }.onSuccess { content ->
-                                                        editingPath = path
-                                                        editorContent = content
-                                                        editorDirty = false
-                                                        showEditor = true
-                                                    }.onFailure {
-                                                        message =
-                                                            "Could not open file: ${it.message}"
-                                                    }
-                                                }
-                                            }
-                                    ) {
+                                    Card {
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -740,14 +717,95 @@ private fun AndroApp(
                                         ) {
                                             Text(
                                                 path,
-                                                modifier = Modifier.weight(1f),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clickable {
+                                                        scope.launch {
+                                                            runCatching {
+                                                                repository.readFile(
+                                                                    selected!!.id,
+                                                                    path
+                                                                )
+                                                            }.onSuccess { content ->
+                                                                editingPath = path
+                                                                editorContent = content
+                                                                editorDirty = false
+                                                                showEditor = true
+                                                            }.onFailure {
+                                                                message =
+                                                                    "Could not open file: ${it.message}"
+                                                            }
+                                                        }
+                                                    },
                                                 style = MaterialTheme.typography.bodyMedium
                                             )
 
-                                            Text(
-                                                "Open",
-                                                color = MaterialTheme.colorScheme.secondary
-                                            )
+                                            TextButton(
+                                                onClick = {
+                                                    scope.launch {
+                                                        runCatching {
+                                                            repository.readFile(
+                                                                selected!!.id,
+                                                                path
+                                                            )
+                                                        }.onSuccess { content ->
+                                                            editingPath = path
+                                                            editorContent = content
+                                                            editorDirty = false
+                                                            showEditor = true
+                                                        }.onFailure {
+                                                            message =
+                                                                "Could not open file: ${it.message}"
+                                                        }
+                                                    }
+                                                }
+                                            ) {
+                                                Text("Open")
+                                            }
+
+                                            Box {
+                                                IconButton(
+                                                    onClick = {
+                                                        fileMenuPath = path
+                                                    }
+                                                ) {
+                                                    Text(
+                                                        "⋮",
+                                                        fontSize = 22.sp
+                                                    )
+                                                }
+
+                                                DropdownMenu(
+                                                    expanded = fileMenuPath == path,
+                                                    onDismissRequest = {
+                                                        fileMenuPath = null
+                                                    }
+                                                ) {
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text("Rename")
+                                                        },
+                                                        onClick = {
+                                                            entryPath = path
+                                                            newEntryName =
+                                                                path.substringAfterLast("/")
+                                                            fileMenuPath = null
+                                                            showRenameEntry = true
+                                                        }
+                                                    )
+
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text("Delete")
+                                                        },
+                                                        onClick = {
+                                                            entryPath = path
+                                                            fileMenuPath = null
+                                                            showDeleteEntry = true
+                                                        }
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1048,6 +1106,132 @@ private fun AndroApp(
                     TextButton(
                         onClick = {
                             showCreateDirectory = false
+                        }
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        if (showRenameEntry) {
+            AlertDialog(
+                onDismissRequest = {
+                    showRenameEntry = false
+                },
+                title = {
+                    Text("Rename file")
+                },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            entryPath,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = newEntryName,
+                            onValueChange = {
+                                newEntryName = it
+                            },
+                            label = {
+                                Text("New file name")
+                            },
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                repository.renameEntry(
+                                    selected!!.id,
+                                    entryPath,
+                                    newEntryName
+                                )
+                            }.onSuccess {
+                                refreshFiles()
+                                message = "Renamed $entryPath to $newEntryName."
+                                showRenameEntry = false
+                                entryPath = ""
+                                newEntryName = ""
+                            }.onFailure {
+                                message =
+                                    "Rename failed: ${it.message}"
+                            }
+                        },
+                        enabled = newEntryName.isNotBlank() &&
+                            selected != null
+                    ) {
+                        Text("Rename")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showRenameEntry = false
+                        }
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        if (showDeleteEntry) {
+            AlertDialog(
+                onDismissRequest = {
+                    showDeleteEntry = false
+                },
+                title = {
+                    Text("Delete file?")
+                },
+                text = {
+                    Text(
+                        "Are you sure you want to permanently delete \"$entryPath\"? This action cannot be undone."
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                repository.deleteEntry(
+                                    selected!!.id,
+                                    entryPath
+                                )
+                            }.onSuccess {
+                                if (editingPath == entryPath) {
+                                    showEditor = false
+                                    editingPath = ""
+                                    editorContent = ""
+                                    editorDirty = false
+                                }
+
+                                refreshFiles()
+                                message = "Deleted $entryPath."
+                                showDeleteEntry = false
+                                entryPath = ""
+                            }.onFailure {
+                                message =
+                                    "Delete failed: ${it.message}"
+                            }
+                        },
+                        enabled = selected != null
+                    ) {
+                        Text(
+                            "Delete",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showDeleteEntry = false
                         }
                     ) {
                         Text("Cancel")
