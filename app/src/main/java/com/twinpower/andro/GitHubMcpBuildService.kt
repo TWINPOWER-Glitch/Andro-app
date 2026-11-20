@@ -35,7 +35,8 @@ class GitHubMcpBuildService(
 
         val sync = GitHubProjectSync(
             repository = repository,
-            tokenProvider = authenticatedTokenProvider
+            tokenProvider = authenticatedTokenProvider,
+            editorDraftStore = EditorDraftStore(applicationContext)
         )
 
         val workflows = GitHubWorkflowManager(

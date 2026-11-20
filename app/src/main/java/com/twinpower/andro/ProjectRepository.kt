@@ -624,6 +624,7 @@ class ProjectRepository(private val context: Context) {
         )
     }
 
+    @Synchronized
     fun writeFileBytes(
         projectId: String,
         relativePath: String,
@@ -691,6 +692,31 @@ class ProjectRepository(private val context: Context) {
                 backup.delete()
             }
         }
+    }
+
+    /**
+     * Replaces a file only if it still contains the version the editor opened.
+     * Synchronization uses the same repository monitor for writes, so a pull
+     * cannot race between this comparison and the replacement.
+     *
+     * @return the current file content when it changed, or null after a write.
+     */
+    @Synchronized
+    fun writeFileIfUnchanged(
+        projectId: String,
+        relativePath: String,
+        expectedContent: String,
+        newContent: String
+    ): String? {
+        val currentContent = readFile(projectId, relativePath)
+        if (currentContent != expectedContent) return currentContent
+
+        writeFileBytes(
+            projectId,
+            relativePath,
+            newContent.toByteArray(Charsets.UTF_8)
+        )
+        return null
     }
 
     fun createDirectory(

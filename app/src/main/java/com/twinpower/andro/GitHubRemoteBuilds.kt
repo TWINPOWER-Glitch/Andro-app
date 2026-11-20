@@ -21,32 +21,72 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+
+private fun runWasCreatedAfterDispatch(
+    createdAt: String,
+    dispatchedAt: String
+): Boolean =
+    runCatching {
+        !Instant.parse(createdAt).isBefore(Instant.parse(dispatchedAt))
+    }.getOrDefault(false)
+
+private fun buildFailureSummary(run: GitHubWorkflowRun): String =
+    when (run.conclusion) {
+        "failure" -> "The workflow failed."
+        "cancelled" -> "The workflow was cancelled."
+        "timed_out" -> "The workflow exceeded its time limit."
+        "action_required" -> "GitHub requires an action before this workflow can continue."
+        "startup_failure" -> "GitHub could not start the workflow."
+        "stale" -> "GitHub marked this workflow run as stale."
+        "skipped" -> "The workflow was skipped by its conditions."
+        "neutral" -> "The workflow finished without a success or failure result."
+        else -> "The workflow completed with ${run.conclusion ?: "an unknown result"}."
+    }
 
 @Composable
 fun GitHubRemoteBuilds(repository: ProjectRepository) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
 
-    val projects = remember {
-        repository.listProjects()
+    var projects by remember {
+        mutableStateOf(emptyList<ProjectInfo>())
     }
+
+    var projectsLoading by remember { mutableStateOf(true) }
 
     val bindingStore = remember(context) {
         ProjectGitHubBindingStore(context)
     }
 
-    var selectedProject by remember {
-        mutableStateOf(projects.firstOrNull())
+    var selectedProjectId by rememberSaveable {
+        mutableStateOf<String?>(null)
     }
+
+    var selectedProject by remember {
+        mutableStateOf<ProjectInfo?>(null)
+    }
+
+    var selectedRunId by rememberSaveable {
+        mutableStateOf<Long?>(null)
+    }
+    var trackedRepository by rememberSaveable { mutableStateOf("") }
+    var trackedBranch by rememberSaveable { mutableStateOf("") }
+    var trackedWorkflowId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var trackedDispatchAt by rememberSaveable { mutableStateOf("") }
 
     var projectMenu by remember {
         mutableStateOf(false)
@@ -98,7 +138,11 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
     }
 
     val sync = remember(repository, context) {
-        GitHubProjectSync(repository, tokenProvider)
+        GitHubProjectSync(
+            repository = repository,
+            tokenProvider = tokenProvider,
+            editorDraftStore = EditorDraftStore(context)
+        )
     }
 
     val workflowManager = remember(context) {
@@ -113,6 +157,23 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
      * Restore the saved GitHub repository association whenever
      * the selected local project changes.
      */
+    LaunchedEffect(repository) {
+        runCatching {
+            withContext(Dispatchers.IO) {
+                repository.listProjects()
+            }
+        }.onSuccess { loaded ->
+            projects = loaded
+            selectedProject = loaded.firstOrNull { it.id == selectedProjectId }
+                ?: loaded.firstOrNull()
+            selectedProjectId = selectedProject?.id
+        }.onFailure {
+            if (it is CancellationException) throw it
+            status = "Could not load local projects: ${it.message}"
+        }
+        projectsLoading = false
+    }
+
     LaunchedEffect(selectedProject?.id) {
         val project = selectedProject
 
@@ -240,6 +301,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     "${result.size} workflow(s) loaded."
                 }
             }.onFailure {
+                if (it is CancellationException) throw it
                 status = it.message ?: "Could not load workflows."
             }
 
@@ -265,8 +327,32 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 }
             }.onSuccess { result ->
                 runs = result
-                status = "${result.size} recent workflow run(s) loaded."
+                val trackedRun = result.firstOrNull { run ->
+                    trackedRepository == "${parts.first}/${parts.second}" &&
+                        trackedBranch == branch.trim() &&
+                        trackedWorkflowId == run.workflowId &&
+                        trackedDispatchAt.isNotBlank() &&
+                        runWasCreatedAfterDispatch(
+                            run.createdAt,
+                            trackedDispatchAt
+                        )
+                }
+                if (trackedRun != null) {
+                    selectedRun = trackedRun
+                    selectedRunId = trackedRun.id
+                    status = "Build run ${trackedRun.id} restored from the run list."
+                } else {
+                    selectedRun = result.firstOrNull { it.id == selectedRunId }
+                    status = if (trackedDispatchAt.isNotBlank() &&
+                        trackedRepository == "${parts.first}/${parts.second}"
+                    ) {
+                        "${result.size} recent run(s) loaded. The dispatched run may still be starting."
+                    } else {
+                        "${result.size} recent workflow run(s) loaded."
+                    }
+                }
             }.onFailure {
+                if (it is CancellationException) throw it
                 status = it.message ?: "Could not load workflow runs."
             }
 
@@ -319,6 +405,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             }.onSuccess {
                 status = it.message
             }.onFailure {
+                if (it is CancellationException) throw it
                 status = it.message ?: "GitHub synchronization failed."
             }
 
@@ -393,12 +480,37 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     )
                 )
             }.onSuccess { dispatch ->
-                status =
-                    "Project synchronized (${dispatch.syncResult.filesProcessed} files). " +
-                    "Build dispatch accepted by GitHub. Refresh runs to find its status."
+                trackedRepository = dispatch.repository
+                trackedBranch = dispatch.branch
+                trackedWorkflowId = dispatch.workflowId
+                trackedDispatchAt = dispatch.dispatchedAt
+                selectedRun = null
+                selectedRunId = null
+                status = "Project synchronized (${dispatch.syncResult.filesProcessed} files). " +
+                    "GitHub accepted the build; locating its run..."
 
-                loadRuns()
+                val lookup = runCatching {
+                    orchestrator.findDispatchedRun(dispatch)
+                }
+                lookup.exceptionOrNull()?.let {
+                    if (it is CancellationException) throw it
+                }
+                val matchingRun = lookup.getOrNull()
+                if (matchingRun != null) {
+                    selectedRun = matchingRun
+                    selectedRunId = matchingRun.id
+                    runs = (listOf(matchingRun) + runs.filterNot {
+                        it.id == matchingRun.id
+                    }).take(20)
+                    status = "Build run ${matchingRun.id} is ${matchingRun.status}."
+                } else {
+                    status = "GitHub accepted the build, but its run is not visible yet. " +
+                        "Refresh runs shortly."
+                    loading = false
+                    loadRuns()
+                }
             }.onFailure {
+                if (it is CancellationException) throw it
                 status = it.message ?: "Remote build dispatch failed."
             }
 
@@ -421,6 +533,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 )
             }.onSuccess { result ->
                 selectedRun = result.run
+                selectedRunId = result.run.id
                 artifacts = result.artifacts
 
                 status = when {
@@ -431,9 +544,11 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         "Build succeeded. ${result.artifacts.size} artifact(s) available."
 
                     else ->
-                        "Build completed: ${result.run.conclusion ?: "unknown"}"
+                        "${buildFailureSummary(result.run)} Run ${result.run.id}. " +
+                            "Open GitHub to inspect failed job logs."
                 }
             }.onFailure {
+                if (it is CancellationException) throw it
                 status = it.message ?: "Could not refresh build status."
             }
 
@@ -470,9 +585,10 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 )
             }.onSuccess { downloadedFile ->
                 status =
-                    "Artifact downloaded and extracted successfully. " +
+                    "${artifact.name} downloaded and extracted. " +
                     "Project location: ${downloadedFile.absolutePath}"
             }.onFailure {
+                if (it is CancellationException) throw it
                 status = it.message ?: "Artifact download failed."
             }
 
@@ -528,15 +644,21 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         text = { Text(project.name) },
                         onClick = {
                             selectedProject = project
+                            selectedProjectId = project.id
                             projectMenu = false
                             selectedRun = null
+                            selectedRunId = null
                             artifacts = emptyList()
                         }
                     )
                 }
             }
 
-            if (projects.isEmpty()) {
+            if (projectsLoading) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else if (projects.isEmpty()) {
                 Text(
                     "Create or import a project in Workspace before synchronizing.",
                     style = MaterialTheme.typography.bodySmall
@@ -564,6 +686,12 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 label = { Text("Repository name") },
                 placeholder = { Text("android-project") },
                 singleLine = true
+            )
+
+            Text(
+                "Enter the repository owner and name separately. Andro pushes the selected " +
+                    "project to the branch before dispatching a build.",
+                style = MaterialTheme.typography.bodySmall
             )
 
             OutlinedTextField(
@@ -623,6 +751,12 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             ) {
                 Text("Load GitHub Actions workflows")
             }
+
+            Text(
+                "Choose an active workflow that supports workflow_dispatch. The GitHub " +
+                    "connection needs repository contents write and Actions write access.",
+                style = MaterialTheme.typography.bodySmall
+            )
 
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
@@ -727,10 +861,27 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                             enabled = !loading,
                             onClick = {
                                 selectedRun = run
+                                selectedRunId = run.id
                                 refreshSelectedRun(run)
                             }
                         ) {
                             Text("Inspect run")
+                        }
+
+                        if (run.status == "completed" && !run.succeeded) {
+                            Text(
+                                buildFailureSummary(run),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            if (run.htmlUrl.startsWith("https://github.com/")) {
+                                OutlinedButton(
+                                    enabled = !loading,
+                                    onClick = { uriHandler.openUri(run.htmlUrl) }
+                                ) {
+                                    Text("Open GitHub job logs")
+                                }
+                            }
                         }
                     }
                 }

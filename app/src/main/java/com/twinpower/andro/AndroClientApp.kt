@@ -9,12 +9,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -22,28 +31,43 @@ fun AndroClientApp(
     repository: ProjectRepository,
     mcp: AndroMcpServer
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val draftStore = remember(context) { EditorDraftStore(context) }
 
     var projects by remember {
-        mutableStateOf(repository.listProjects())
+        mutableStateOf(emptyList<ProjectInfo>())
     }
+
+    var projectsLoading by remember { mutableStateOf(true) }
+    var projectListRequest by remember { mutableIntStateOf(0) }
 
     var selected by remember {
         mutableStateOf<ProjectInfo?>(null)
+    }
+
+    var selectedProjectId by rememberSaveable {
+        mutableStateOf<String?>(null)
     }
 
     var files by remember {
         mutableStateOf<List<String>>(emptyList())
     }
 
-    var tab by remember {
+    var filesLoading by remember { mutableStateOf(false) }
+    var fileListRequest by remember { mutableIntStateOf(0) }
+    var openFileRequest by remember { mutableIntStateOf(0) }
+
+    var tab by rememberSaveable {
         mutableStateOf("Projects")
     }
 
     var busy by remember {
         mutableStateOf(false)
     }
+    var workspaceOperation by remember { mutableStateOf<String?>(null) }
 
     var mcpRunning by remember {
         mutableStateOf(false)
@@ -67,10 +91,28 @@ fun AndroClientApp(
     var entryPath by remember { mutableStateOf("") }
     var newEntryName by remember { mutableStateOf("") }
 
-    var editingPath by remember { mutableStateOf("") }
-    var editingProjectId by remember { mutableStateOf<String?>(null) }
+    var editingPath by rememberSaveable { mutableStateOf("") }
+    var editingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var editorContent by remember { mutableStateOf("") }
+    var editorBaseContent by remember { mutableStateOf("") }
     var editorDirty by remember { mutableStateOf(false) }
+    var draftStatus by remember { mutableStateOf("No unsaved changes") }
+    var draftErrorShown by remember { mutableStateOf(false) }
+    var editorLoadedKey by remember { mutableStateOf<String?>(null) }
+    var isLoadingFile by remember {
+        mutableStateOf(editingProjectId != null && editingPath.isNotBlank())
+    }
+    var isSavingFile by remember { mutableStateOf(false) }
+    var fileOperationBusy by remember { mutableStateOf(false) }
+    var draftConflict by remember { mutableStateOf<EditorDraft?>(null) }
+    var fileConflict by remember { mutableStateOf<EditorFileConflict?>(null) }
+    val latestEditorSnapshot by rememberUpdatedState(
+        Triple(
+            editingProjectId,
+            editingPath,
+            Triple(editorBaseContent, editorContent, editorDirty)
+        )
+    )
 
     var pendingOpenPath by remember { mutableStateOf<String?>(null) }
     var pendingProject by remember { mutableStateOf<ProjectInfo?>(null) }
@@ -83,33 +125,92 @@ fun AndroClientApp(
     }
 
     fun refreshProjects() {
-        projects = repository.listProjects()
-
-        selected = selected?.let { current ->
-            projects.firstOrNull { it.id == current.id }
+        val request = ++projectListRequest
+        scope.launch {
+            projectsLoading = true
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.listProjects()
+                }
+            }.onSuccess { loaded ->
+                if (request == projectListRequest) {
+                    projects = loaded
+                    val currentId = selected?.id ?: selectedProjectId
+                    selected = loaded.firstOrNull { it.id == currentId }
+                    selectedProjectId = selected?.id
+                }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                if (request == projectListRequest) {
+                    showMessage("Could not load projects: ${it.message}")
+                }
+            }
+            if (request == projectListRequest) projectsLoading = false
         }
     }
 
     fun refreshFiles(projectId: String? = selected?.id) {
-        files = if (projectId == null) {
-            emptyList()
-        } else {
-            repository.listFiles(projectId)
+        val request = ++fileListRequest
+        if (projectId == null) {
+            files = emptyList()
+            filesLoading = false
+            return
+        }
+
+        scope.launch {
+            filesLoading = true
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.listFiles(projectId)
+                }
+            }.onSuccess { loaded ->
+                if (request == fileListRequest) files = loaded
+            }.onFailure {
+                if (it is CancellationException) throw it
+                if (request == fileListRequest) {
+                    files = emptyList()
+                    showMessage("Could not list project files: ${it.message}")
+                }
+            }
+            if (request == fileListRequest) filesLoading = false
         }
     }
 
     fun clearEditor() {
+        openFileRequest++
+        isLoadingFile = false
+        fileConflict = null
+        val projectId = editingProjectId
+        val path = editingPath
+        if (projectId != null && path.isNotBlank()) {
+            draftStore.markDirty(projectId, path, false)
+            scope.launch {
+                runCatching { draftStore.delete(projectId, path) }
+            }
+        }
+
         editingPath = ""
         editingProjectId = null
         editorContent = ""
+        editorBaseContent = ""
         editorDirty = false
+        draftStatus = "No unsaved changes"
+        editorLoadedKey = null
+        draftConflict = null
     }
 
     fun selectProject(
         project: ProjectInfo,
         destination: String
     ) {
-        if (editorDirty && selected?.id != project.id) {
+        if (isSavingFile) {
+            showMessage("Wait for the current file save to finish.")
+            return
+        }
+
+        if ((editorDirty || draftConflict != null) &&
+            selected?.id != project.id
+        ) {
             pendingProject = project
             pendingTab = destination
             pendingOpenPath = null
@@ -122,38 +223,103 @@ fun AndroClientApp(
         }
 
         selected = project
+        selectedProjectId = project.id
         refreshFiles(project.id)
         tab = destination
 
         showMessage("Opened ${project.name}.")
     }
 
-    fun openFile(path: String) {
-        val projectId = selected?.id ?: return
+    fun openFile(
+        path: String,
+        projectIdOverride: String? = null
+    ) {
+        val projectId = projectIdOverride ?: selected?.id ?: return
+        val key = "$projectId:$path"
 
-        if (editorDirty && editingPath != path) {
+        if (editorLoadedKey == key) return
+
+        if ((editorDirty || draftConflict != null) &&
+            (editingProjectId != projectId || editingPath != path)
+        ) {
             pendingOpenPath = path
             pendingProject = null
             showDiscardChanges = true
             return
         }
 
+        val request = ++openFileRequest
         scope.launch {
+            isLoadingFile = true
             runCatching {
-                repository.readFile(projectId, path)
-            }.onSuccess { content ->
+                withContext(Dispatchers.IO) {
+                    val content = repository.readFile(projectId, path)
+                    val draftResult = runCatching {
+                        draftStore.read(projectId, path)
+                    }
+                    val draftError = draftResult.exceptionOrNull()
+                    if (draftError is CancellationException) throw draftError
+                    Triple(content, draftResult.getOrNull(), draftError)
+                }
+            }.onSuccess { (content, draft, draftError) ->
+                if (request != openFileRequest) return@onSuccess
                 editingPath = path
                 editingProjectId = projectId
+                selectedProjectId = projectId
+                editorBaseContent = content
                 editorContent = content
                 editorDirty = false
+                editorLoadedKey = key
+
+                if (draftError != null) {
+                    draftStore.markDirty(projectId, path, false)
+                    draftStore.delete(projectId, path)
+                    showMessage(
+                        "A saved draft could not be recovered. The last saved file was opened."
+                    )
+                }
+
+                if (draft != null) {
+                    if (draftStore.matchesCurrentFile(draft, content)) {
+                        editorContent = draft.content
+                        editorDirty = draft.content != content
+                        draftStore.markDirty(projectId, path, editorDirty)
+                        if (!editorDirty) {
+                            draftStore.delete(projectId, path)
+                        } else {
+                            showMessage("Recovered unsaved changes for $path.")
+                        }
+                    } else {
+                        draftStore.markDirty(projectId, path, true)
+                        draftConflict = draft
+                    }
+                } else {
+                    draftStore.markDirty(projectId, path, false)
+                }
             }.onFailure {
-                showMessage("Could not open file: ${it.message}")
+                if (it is CancellationException) throw it
+                if (request == openFileRequest) {
+                    if (editorLoadedKey != key) {
+                        editingPath = ""
+                        editingProjectId = null
+                        editorContent = ""
+                        editorBaseContent = ""
+                        editorDirty = false
+                    }
+                    showMessage("Could not open file: ${it.message}")
+                }
             }
+            if (request == openFileRequest) isLoadingFile = false
         }
     }
 
     fun closeEditor() {
-        if (editorDirty) {
+        if (isSavingFile) {
+            showMessage("Wait for the current file save to finish.")
+            return
+        }
+
+        if (editorDirty || draftConflict != null) {
             pendingOpenPath = ""
             pendingProject = null
             showDiscardChanges = true
@@ -162,22 +328,92 @@ fun AndroClientApp(
         }
     }
 
-    fun saveFile() {
+    fun saveFile(overwriteIfCurrentIs: String? = null) {
         val projectId = editingProjectId ?: return
         val path = editingPath
+        val baseContent = editorBaseContent
+        val contentToSave = editorContent
 
-        runCatching {
-            repository.writeFile(
-                projectId,
-                path,
-                editorContent
-            )
-        }.onSuccess {
-            editorDirty = false
-            refreshFiles(projectId)
-            showMessage("Saved $path.")
-        }.onFailure {
-            showMessage("Save failed: ${it.message}")
+        scope.launch {
+            isSavingFile = true
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val currentContent = repository.writeFileIfUnchanged(
+                        projectId = projectId,
+                        relativePath = path,
+                        expectedContent = overwriteIfCurrentIs ?: baseContent,
+                        newContent = contentToSave
+                    )
+                    if (currentContent != null) {
+                        throw EditorFileChangedException(currentContent)
+                    }
+                }
+            }.onSuccess {
+                editorBaseContent = contentToSave
+                if (editorContent == contentToSave) editorDirty = false
+                if (!editorDirty) draftStore.delete(projectId, path)
+                draftStore.markDirty(projectId, path, editorDirty)
+                fileConflict = null
+                refreshFiles(projectId)
+                showMessage("Saved $path.")
+            }.onFailure {
+                if (it is CancellationException) throw it
+                if (it is EditorFileChangedException) {
+                    fileConflict = EditorFileConflict(
+                        projectId = projectId,
+                        path = path,
+                        latestContent = it.latestContent
+                    )
+                } else {
+                    showMessage("Save failed: ${it.message}")
+                }
+            }
+            isSavingFile = false
+        }
+    }
+
+    DisposableEffect(
+        lifecycleOwner,
+        draftStore,
+        editingProjectId,
+        editingPath
+    ) {
+        val projectId = editingProjectId
+        val path = editingPath
+        var persistedAtStop = false
+
+        fun persistLatestDraft() {
+            val snapshot = latestEditorSnapshot
+            if (projectId != null && path.isNotBlank() &&
+                snapshot.first == projectId &&
+                snapshot.second == path &&
+                snapshot.third.third
+            ) {
+                draftStore.persistNow(
+                    projectId,
+                    path,
+                    snapshot.third.first,
+                    snapshot.third.second
+                )
+            }
+        }
+
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> persistedAtStop = false
+                Lifecycle.Event.ON_STOP -> {
+                    persistLatestDraft()
+                    persistedAtStop = true
+                }
+                else -> Unit
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (!persistedAtStop) persistLatestDraft()
         }
     }
 
@@ -187,6 +423,7 @@ fun AndroClientApp(
         if (uri != null) {
             scope.launch {
                 busy = true
+                workspaceOperation = "Importing project…"
 
                 runCatching {
                     repository.importProject(uri)
@@ -199,8 +436,80 @@ fun AndroClientApp(
                 }
 
                 busy = false
+                workspaceOperation = null
             }
         }
+    }
+
+    LaunchedEffect(projectsLoading, projects, selectedProjectId) {
+        if (!projectsLoading) {
+            selected = selectedProjectId?.let { id ->
+                projects.firstOrNull { it.id == id }
+            }
+
+            selected?.let { project ->
+                refreshFiles(project.id)
+            }
+        }
+    }
+
+    LaunchedEffect(projectsLoading, editingProjectId, editingPath) {
+        val projectId = editingProjectId
+        if (!projectsLoading && projectId != null && editingPath.isNotBlank()) {
+            openFile(editingPath, projectId)
+        }
+    }
+
+    LaunchedEffect(
+        editingProjectId,
+        editingPath,
+        editorContent,
+        editorBaseContent,
+        editorDirty,
+        draftConflict
+    ) {
+        val projectId = editingProjectId
+        val path = editingPath
+        if (projectId == null || path.isBlank()) return@LaunchedEffect
+
+        val conflictMatchesFile = draftConflict?.let {
+            it.projectId == projectId && it.path == path
+        } == true
+
+        if (!editorDirty) {
+            if (!conflictMatchesFile) {
+                draftStore.delete(projectId, path)
+                draftStatus = "No unsaved changes"
+            } else {
+                draftStatus = "Draft needs review"
+            }
+            return@LaunchedEffect
+        }
+
+        draftStatus = "Saving recovery copy…"
+        delay(300)
+        runCatching {
+            draftStore.save(
+                projectId = projectId,
+                path = path,
+                baseContent = editorBaseContent,
+                content = editorContent
+            )
+        }.onSuccess {
+            draftStatus = "Recovery copy saved"
+            draftErrorShown = false
+        }.onFailure {
+            if (it is CancellationException) throw it
+            draftStatus = "Recovery copy failed"
+            if (!draftErrorShown) {
+                showMessage("Could not preserve the unsaved draft: ${it.message}")
+                draftErrorShown = true
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshProjects()
     }
 
     MaterialTheme(
@@ -299,6 +608,31 @@ fun AndroClientApp(
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
 
+                if (busy) {
+                    item {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                workspaceOperation ?: "Working…",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+
+                if (fileOperationBusy) {
+                    item {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
                 // -------------------------------------------------
                 // PROJECTS
                 // -------------------------------------------------
@@ -352,12 +686,18 @@ fun AndroClientApp(
 
                     if (projects.isEmpty()) {
                         item {
+                            if (projectsLoading) {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
                             ClientEmptyState(
                                 title = "No projects yet",
                                 description =
                                     "Create a new Android project or import " +
                                     "an existing project to get started."
                             )
+                            }
                         }
                     }
 
@@ -498,9 +838,21 @@ fun AndroClientApp(
                                     path = editingPath,
                                     content = editorContent,
                                     dirty = editorDirty,
+                                    loading = isLoadingFile,
+                                    saving = isSavingFile,
+                                    draftStatus = draftStatus,
                                     onContentChange = {
                                         editorContent = it
-                                        editorDirty = true
+                                        editorDirty = it != editorBaseContent
+                                        editingProjectId?.let { projectId ->
+                                            if (editingPath.isNotBlank()) {
+                                                draftStore.markDirty(
+                                                    projectId,
+                                                    editingPath,
+                                                    editorDirty
+                                                )
+                                            }
+                                        }
                                     },
                                     onSave = {
                                         saveFile()
@@ -519,7 +871,13 @@ fun AndroClientApp(
                             )
                         }
 
-                        if (files.isEmpty()) {
+                        if (filesLoading) {
+                            item {
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        } else if (files.isEmpty()) {
                             item {
                                 ClientEmptyState(
                                     title = "No visible files",
@@ -761,6 +1119,7 @@ fun AndroClientApp(
                         onClick = {
                             scope.launch {
                                 busy = true
+                                workspaceOperation = "Creating project…"
 
                                 runCatching {
                                     repository.createProject(projectName)
@@ -777,6 +1136,7 @@ fun AndroClientApp(
                                 }
 
                                 busy = false
+                                workspaceOperation = null
                             }
                         }
                     ) {
@@ -834,28 +1194,30 @@ fun AndroClientApp(
                 confirmButton = {
                     TextButton(
                         enabled = newFilePath.isNotBlank() &&
-                            selected != null,
+                            selected != null && !fileOperationBusy,
                         onClick = {
                             val projectId = selected?.id
 
                             if (projectId != null) {
                                 val path = newFilePath.trim()
 
-                                runCatching {
-                                    repository.createFile(
-                                        projectId,
-                                        path
-                                    )
-                                }.onSuccess {
-                                    refreshFiles(projectId)
-                                    newFilePath = ""
-                                    showCreateFile = false
-                                    openFile(path)
-                                    showMessage("Created $path.")
-                                }.onFailure {
-                                    showMessage(
-                                        "File creation failed: ${it.message}"
-                                    )
+                                scope.launch {
+                                    fileOperationBusy = true
+                                    runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            repository.createFile(projectId, path)
+                                        }
+                                    }.onSuccess {
+                                        refreshFiles(projectId)
+                                        newFilePath = ""
+                                        showCreateFile = false
+                                        openFile(path)
+                                        showMessage("Created $path.")
+                                    }.onFailure {
+                                        if (it is CancellationException) throw it
+                                        showMessage("File creation failed: ${it.message}")
+                                    }
+                                    fileOperationBusy = false
                                 }
                             }
                         }
@@ -913,25 +1275,28 @@ fun AndroClientApp(
                 confirmButton = {
                     TextButton(
                         enabled = newDirectoryPath.isNotBlank() &&
-                            selected != null,
+                            selected != null && !fileOperationBusy,
                         onClick = {
                             val projectId = selected?.id
 
                             if (projectId != null) {
-                                runCatching {
-                                    repository.createDirectory(
-                                        projectId,
-                                        newDirectoryPath.trim()
-                                    )
-                                }.onSuccess {
-                                    refreshFiles(projectId)
-                                    newDirectoryPath = ""
-                                    showCreateDirectory = false
-                                    showMessage("Folder created.")
-                                }.onFailure {
-                                    showMessage(
-                                        "Folder creation failed: ${it.message}"
-                                    )
+                                val path = newDirectoryPath.trim()
+                                scope.launch {
+                                    fileOperationBusy = true
+                                    runCatching {
+                                        withContext(Dispatchers.IO) {
+                                            repository.createDirectory(projectId, path)
+                                        }
+                                    }.onSuccess {
+                                        refreshFiles(projectId)
+                                        newDirectoryPath = ""
+                                        showCreateDirectory = false
+                                        showMessage("Folder created.")
+                                    }.onFailure {
+                                        if (it is CancellationException) throw it
+                                        showMessage("Folder creation failed: ${it.message}")
+                                    }
+                                    fileOperationBusy = false
                                 }
                             }
                         }
@@ -987,46 +1352,46 @@ fun AndroClientApp(
                 confirmButton = {
                     TextButton(
                         enabled = newEntryName.isNotBlank() &&
-                            selected != null,
+                            selected != null && !fileOperationBusy,
                         onClick = {
                             val projectId = selected?.id
                             val oldPath = entryPath
                             val newName = newEntryName.trim()
 
                             if (projectId != null) {
-                                runCatching {
-                                    repository.renameEntry(
-                                        projectId,
-                                        oldPath,
-                                        newName
-                                    )
-                                }.onSuccess {
-                                    val parent =
-                                        oldPath.substringBeforeLast("/", "")
+                                if (editingProjectId == projectId &&
+                                    editingPath == oldPath &&
+                                    (editorDirty || draftConflict != null)
+                                ) {
+                                    showMessage("Save or discard this file's edits before renaming it.")
+                                } else {
+                                    scope.launch {
+                                        fileOperationBusy = true
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                repository.renameEntry(projectId, oldPath, newName)
+                                            }
+                                        }.onSuccess {
+                                            val parent = oldPath.substringBeforeLast("/", "")
+                                            val newPath = if (parent.isBlank()) newName else "$parent/$newName"
 
-                                    val newPath = if (parent.isBlank()) {
-                                        newName
-                                    } else {
-                                        "$parent/$newName"
+                                            if (editingProjectId == projectId && editingPath == oldPath) {
+                                                scope.launch { draftStore.delete(projectId, oldPath) }
+                                                editingPath = newPath
+                                                editorLoadedKey = "$projectId:$newPath"
+                                            }
+
+                                            refreshFiles(projectId)
+                                            showRenameEntry = false
+                                            entryPath = ""
+                                            newEntryName = ""
+                                            showMessage("Renamed to $newPath.")
+                                        }.onFailure {
+                                            if (it is CancellationException) throw it
+                                            showMessage("Rename failed: ${it.message}")
+                                        }
+                                        fileOperationBusy = false
                                     }
-
-                                    if (
-                                        editingProjectId == projectId &&
-                                        editingPath == oldPath
-                                    ) {
-                                        editingPath = newPath
-                                    }
-
-                                    refreshFiles(projectId)
-                                    showRenameEntry = false
-                                    entryPath = ""
-                                    newEntryName = ""
-
-                                    showMessage("Renamed to $newPath.")
-                                }.onFailure {
-                                    showMessage(
-                                        "Rename failed: ${it.message}"
-                                    )
                                 }
                             }
                         }
@@ -1066,32 +1431,38 @@ fun AndroClientApp(
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = selected != null,
+                        enabled = selected != null && !fileOperationBusy,
                         onClick = {
                             val projectId = selected?.id
 
                             if (projectId != null) {
-                                runCatching {
-                                    repository.deleteEntry(
-                                        projectId,
-                                        entryPath
-                                    )
-                                }.onSuccess {
-                                    if (
-                                        editingProjectId == projectId &&
-                                        editingPath == entryPath
-                                    ) {
-                                        clearEditor()
+                                val path = entryPath
+                                if (editingProjectId == projectId &&
+                                    editingPath == path &&
+                                    (editorDirty || draftConflict != null)
+                                ) {
+                                    showMessage("Save or discard this file's edits before deleting it.")
+                                } else {
+                                    scope.launch {
+                                        fileOperationBusy = true
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                repository.deleteEntry(projectId, path)
+                                            }
+                                        }.onSuccess {
+                                            if (editingProjectId == projectId && editingPath == path) {
+                                                clearEditor()
+                                            }
+                                            refreshFiles(projectId)
+                                            showMessage("Deleted $path.")
+                                            entryPath = ""
+                                            showDeleteEntry = false
+                                        }.onFailure {
+                                            if (it is CancellationException) throw it
+                                            showMessage("Delete failed: ${it.message}")
+                                        }
+                                        fileOperationBusy = false
                                     }
-
-                                    refreshFiles(projectId)
-                                    showMessage("Deleted $entryPath.")
-                                    entryPath = ""
-                                    showDeleteEntry = false
-                                }.onFailure {
-                                    showMessage(
-                                        "Delete failed: ${it.message}"
-                                    )
                                 }
                             }
                         }
@@ -1117,6 +1488,132 @@ fun AndroClientApp(
         // ---------------------------------------------------------
         // UNSAVED CHANGES
         // ---------------------------------------------------------
+
+        val changedFile = fileConflict
+        if (changedFile != null &&
+            changedFile.projectId == editingProjectId &&
+            changedFile.path == editingPath
+        ) {
+            AlertDialog(
+                onDismissRequest = {
+                    if (!isLoadingFile) fileConflict = null
+                },
+                title = { Text("File changed on disk") },
+                text = {
+                    Text(
+                        "${changedFile.path} changed after you opened it, likely through sync. " +
+                            "Your editor draft is preserved. Choose whether to replace the latest file or reload it."
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            fileConflict = null
+                            saveFile(overwriteIfCurrentIs = changedFile.latestContent)
+                        }
+                    ) {
+                        Text("Overwrite latest")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                isLoadingFile = true
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        repository.readFile(
+                                            changedFile.projectId,
+                                            changedFile.path
+                                        )
+                                    }
+                                }.onSuccess { latest ->
+                                    if (editingProjectId == changedFile.projectId &&
+                                        editingPath == changedFile.path
+                                    ) {
+                                        editorBaseContent = latest
+                                        editorContent = latest
+                                        editorDirty = false
+                                        draftStore.markDirty(
+                                            changedFile.projectId,
+                                            changedFile.path,
+                                            false
+                                        )
+                                        fileConflict = null
+                                        draftStore.delete(
+                                            changedFile.projectId,
+                                            changedFile.path
+                                        )
+                                        showMessage("Reloaded the latest file version.")
+                                    }
+                                }.onFailure {
+                                    if (it is CancellationException) throw it
+                                    showMessage("Could not reload the file: ${it.message}")
+                                }
+                                isLoadingFile = false
+                            }
+                        }
+                    ) {
+                        Text("Reload latest")
+                    }
+                }
+            )
+        }
+
+        val conflictingDraft = draftConflict
+        if (conflictingDraft != null &&
+            conflictingDraft.projectId == editingProjectId &&
+            conflictingDraft.path == editingPath
+        ) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Recovered draft needs review") },
+                text = {
+                    Text(
+                        "${conflictingDraft.path} changed after this draft was saved. " +
+                            "Recovering it will replace the current file when you save."
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            editorContent = conflictingDraft.content
+                            editorDirty = editorContent != editorBaseContent
+                            draftStore.markDirty(
+                                conflictingDraft.projectId,
+                                conflictingDraft.path,
+                                editorDirty
+                            )
+                            draftConflict = null
+                        }
+                    ) {
+                        Text("Recover draft")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                draftStore.delete(
+                                    conflictingDraft.projectId,
+                                    conflictingDraft.path
+                                )
+                            }
+                            editorContent = editorBaseContent
+                            editorDirty = false
+                            draftStore.markDirty(
+                                conflictingDraft.projectId,
+                                conflictingDraft.path,
+                                false
+                            )
+                            draftConflict = null
+                        }
+                    ) {
+                        Text("Discard draft")
+                    }
+                }
+            )
+        }
 
         if (showDiscardChanges) {
             AlertDialog(
@@ -1149,6 +1646,7 @@ fun AndroClientApp(
 
                             if (targetProject != null) {
                                 selected = targetProject
+                                selectedProjectId = targetProject.id
                                 refreshFiles(targetProject.id)
                                 tab = destination
                             } else if (!targetPath.isNullOrEmpty()) {
@@ -1495,6 +1993,9 @@ private fun EditorPanel(
     path: String,
     content: String,
     dirty: Boolean,
+    loading: Boolean,
+    saving: Boolean,
+    draftStatus: String,
     onContentChange: (String) -> Unit,
     onSave: () -> Unit,
     onClose: () -> Unit
@@ -1543,9 +2044,16 @@ private fun EditorPanel(
                 )
             }
 
+            Text(
+                draftStatus,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
             OutlinedTextField(
                 value = content,
                 onValueChange = onContentChange,
+                enabled = !loading && !saving,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 280.dp),
@@ -1563,14 +2071,15 @@ private fun EditorPanel(
             ) {
                 Button(
                     onClick = onSave,
-                    enabled = dirty,
+                    enabled = dirty && !loading && !saving,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Text("Save changes")
+                    Text(if (saving) "Saving…" else "Save changes")
                 }
 
                 OutlinedButton(
                     onClick = onClose,
+                    enabled = !loading && !saving,
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("Close editor")

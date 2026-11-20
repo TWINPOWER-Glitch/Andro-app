@@ -66,8 +66,6 @@ class GitHubBuildOrchestrator(
             "A valid workflow ID is required."
         }
 
-        val startedAt = Instant.now().toString()
-
         val syncResult = sync.push(
             project = project,
             owner = request.owner,
@@ -75,6 +73,10 @@ class GitHubBuildOrchestrator(
             branch = request.branch,
             commitMessage = request.commitMessage
         )
+
+        // Start the correlation window immediately before dispatch. Uploads can
+        // take long enough that an earlier timestamp could match an unrelated run.
+        val startedAt = Instant.now().toString()
 
         workflows.dispatchWorkflow(
             owner = request.owner,

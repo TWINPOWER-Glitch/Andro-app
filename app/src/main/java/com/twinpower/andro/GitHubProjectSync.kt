@@ -23,7 +23,8 @@ data class GitHubSyncResult(
 
 class GitHubProjectSync(
     private val repository: ProjectRepository,
-    private val tokenProvider: () -> String?
+    private val tokenProvider: () -> String?,
+    private val editorDraftStore: EditorDraftStore? = null
 ) {
     companion object {
         private const val API = "https://api.github.com"
@@ -333,6 +334,12 @@ class GitHubProjectSync(
 
         require(commitMessage.length <= 500) {
             "Commit message is too long."
+        }
+
+        if (editorDraftStore?.hasProjectDrafts(project.id) == true) {
+            throw IOException(
+                "This project has unsaved editor changes. Save or discard them before pushing or building."
+            )
         }
 
         val files = repository

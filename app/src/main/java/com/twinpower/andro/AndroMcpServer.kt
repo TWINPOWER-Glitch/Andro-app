@@ -9,6 +9,8 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.http.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -432,27 +434,31 @@ class AndroMcpServer(
 
             val data: Any = when (name) {
 
-                "andro_list_projects" -> JSONArray().also { array ->
+                "andro_list_projects" -> {
+                    val savedProjects = withContext(Dispatchers.IO) {
+                        projects.listProjects()
+                    }
 
-                    projects.listProjects().forEach { project ->
-
-                        array.put(
-                            JSONObject()
-                                .put("id", project.id)
-                                .put("name", project.name)
-                                .put(
-                                    "hasGradleWrapper",
-                                    project.hasGradleWrapper
-                                )
-                        )
+                    JSONArray().also { array ->
+                        savedProjects.forEach { project ->
+                            array.put(
+                                JSONObject()
+                                    .put("id", project.id)
+                                    .put("name", project.name)
+                                    .put(
+                                        "hasGradleWrapper",
+                                        project.hasGradleWrapper
+                                    )
+                            )
+                        }
                     }
                 }
 
                 "andro_get_project" -> {
 
-                    val project = projects.getProject(
-                        args.getString("projectId")
-                    )
+                    val project = withContext(Dispatchers.IO) {
+                        projects.getProject(args.getString("projectId"))
+                    }
 
                     JSONObject()
                         .put("id", project.id)
@@ -467,9 +473,9 @@ class AndroMcpServer(
                 "andro_list_project_files" -> {
 
                     JSONArray(
-                        projects.listFiles(
-                            args.getString("projectId")
-                        )
+                        withContext(Dispatchers.IO) {
+                            projects.listFiles(args.getString("projectId"))
+                        }
                     )
                 }
 
@@ -482,10 +488,9 @@ class AndroMcpServer(
                         .put("path", path)
                         .put(
                             "content",
-                            projects.readFile(
-                                projectId,
-                                path
-                            )
+                            withContext(Dispatchers.IO) {
+                                projects.readFile(projectId, path)
+                            }
                         )
                 }
 

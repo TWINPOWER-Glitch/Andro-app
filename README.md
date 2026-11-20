@@ -1,60 +1,88 @@
-# Andro — standalone Android development environment
+# Andro
 
-This project replaces the previous Vercel-dependent dashboard with an Android-first application.
+Andro is an Android app for managing Android projects from a phone. It keeps project files in the app's private storage, provides a lightweight source editor, syncs projects with GitHub, and uses GitHub Actions for Android builds. It also offers an optional MCP connection for local or remote clients.
 
-## Implemented in this increment
+Andro is currently a development foundation, not a Play Store release.
 
-- Local project workspace stored in the app's private files directory.
-- Import a Gradle project through Android's Storage Access Framework.
-- Import a compatible Android build toolchain directory.
-- Inspect imported project files.
-- Run Gradle tasks locally through the imported toolchain.
-- Capture build output, status, and APK/AAB paths.
-- Embedded, loopback-only MCP Streamable HTTP endpoint with tools for listing projects, inspecting files, reading files, and starting/checking local builds.
-- No Vercel server or GitHub account is required for these local functions.
+## What works today
 
-## Important build-runtime limitation
+- Sign in to an Andro account with GitHub through Supabase Auth using the PKCE flow.
+- Create a project from Andro's Android project template, or import a project through Android's Storage Access Framework.
+- Browse, create, edit, rename, and delete project files in Andro's private workspace.
+- Recover unsaved editor drafts after app recreation. Before saving, Andro checks whether the file changed on disk and asks whether to reload or explicitly overwrite the newer version.
+- Connect GitHub separately to browse repositories and branches, associate a project with a repository, and push or pull project files.
+- Install or select a GitHub Actions workflow, dispatch a remote build, restore the selected project/run after activity recreation, inspect failures with a link to GitHub job logs, and download artifacts into the project.
+- Start an authenticated MCP endpoint on `127.0.0.1:8765` while using the app. Andro exposes project listing and file-reading tools, plus remote build and status tools.
+- Optionally pair Andro with the Cloudflare MCP relay to connect remote MCP clients. Client tokens can be created with read-only access or with build access and can be revoked.
 
-The Android application cannot assume that desktop Android Studio's JDK/SDK binaries will execute on Android. A compatible ARM64/Android (Bionic) runtime is required. This source includes the local process/build adapter and a toolchain-import mechanism, but **does not yet bundle or automatically provision the JDK, Gradle, Android SDK, and compatible ARM64 `aapt2`**. Until a compatible runtime is imported, the app correctly reports that local builds are unavailable instead of pretending to build.
+## Build model and current limitations
 
-The expected imported toolchain layout is:
+**Andro does not build Android projects on the phone.** `BuildManager` is a compatibility layer and reports that local Gradle execution is disabled. Android builds run in GitHub Actions, so a working GitHub connection, repository binding, and configured workflow are required.
+
+The app can import and store a toolchain directory, but that does not enable local builds. A conventional desktop Android SDK is not an Android-device runtime; an Android-compatible JDK, Gradle runtime, SDK tools, and native build tools would need to be provided and validated before on-device builds could be supported.
+
+Other current limits:
+
+- The editor is a lightweight file editor, not a full IDE with language services or debugging.
+- Editor file reads and writes, and MCP file reads, enforce a 512 KB limit per file. MCP currently has no file-write tool; project import uses a separate copy path.
+- GitHub sync uses GitHub's repository APIs; Andro is not a full Git client and does not provide merge, rebase, or cherry-pick workflows.
+- A push or remote build is blocked while the project has unsaved editor changes, so it cannot silently build or publish the older on-disk file.
+- The MCP server is loopback-only and requires bearer authorization. Its local authorization token is not currently presented as a user-configurable credential for arbitrary local MCP clients. The Cloudflare relay provides the user-facing remote pairing and scoped client-token flow.
+- Remote MCP access depends on the app staying active; the relay is not implemented as a persistent Android foreground service.
+- The CI release APK is unsigned. Release signing and Play Store distribution are not configured.
+
+## Accounts and connections
+
+Andro account sign-in and GitHub repository access are separate:
+
+1. The launcher asks you to sign in to an Andro account using GitHub through Supabase Auth.
+2. Repository browsing, project sync, and GitHub Actions builds use the separate GitHub connection in the **Connect** screen.
+3. The Cloudflare relay is optional. Pair a device before creating MCP client tokens. Grant build access only to clients that need to start remote builds, and revoke tokens that are no longer needed.
+
+The Supabase key configured in `AndroSupabase.kt` is a publishable client key. Do not put a Supabase service-role key, a private GitHub credential, or a Cloudflare secret in the Android source or repository.
+
+## Use Andro
+
+1. Sign in, then create a project or import an existing Android Gradle project.
+2. In **Connect**, authorize GitHub for repository operations.
+3. In **Build**, associate the project with a repository and workflow. Andro can install its build workflow into a selected repository.
+4. Push or pull project files as needed, then dispatch a remote build and monitor the GitHub Actions run. Download the artifact after the run uploads it.
+5. For MCP access, use the local endpoint only with an authorized client, or configure the Cloudflare relay for a remote client.
+
+Remote builds require GitHub Actions to be available and enabled for the selected repository. Workflow permissions and repository policies remain subject to the GitHub account's access.
+
+## Run the Android app
+
+Open the repository root in Android Studio. The project uses:
+
+- JDK 17
+- Android Gradle Plugin 8.9.2
+- Kotlin 2.1.20
+- Android SDK platform 36
+- Gradle 8.13 in CI
+
+The app has `minSdk 26` and `targetSdk 35`. Run the `app` configuration from Android Studio. The CI workflow runs unit tests, Android lint, debug and release APK assembly, and an emulator smoke check of the launcher/authentication screen.
+
+## MCP connections
+
+The local endpoint is:
 
 ```text
-toolchain/
-  bin/
-    bash
-    java
-    gradle                 # optional if the project has gradlew
-  lib/                     # native shared libraries required by the runtime
-  android-sdk/
-    platforms/
-    build-tools/
+http://127.0.0.1:8765/mcp
 ```
 
-The toolchain must be built for the device architecture and Android's runtime environment. A conventional x86_64 Linux/Windows/macOS Android SDK installation is not suitable.
+It listens only on the device loopback interface. MCP requests require an `Authorization: Bearer …` header. The endpoint is not exposed to the LAN, and the app does not currently provide a self-service local token for arbitrary clients. Do not change the bind address or expose the endpoint publicly without a designed authentication and transport-security model.
 
-## Build
+For remote MCP access, use **Connect → Cloudflare relay** to pair the device, connect it, and create a scoped client token. The token is shown once; store it securely. Keep Andro active while you need the relay connection.
 
-- Android Studio
-- JDK 17
-- Android SDK 36
-- Android Gradle Plugin 8.9.2
-- Gradle 8.11.1 or compatible
+## CI and releases
 
-Open `android-app/` in Android Studio and run the `app` configuration.
+`.github/workflows/andro-app-build-check.yml` runs tests, lint, APK builds, and an Android emulator smoke check on relevant pushes and pull requests. Version tags must match the app's `versionName` (for example, `v0.4.0`). A matching tag publishes the debug APK and an **unsigned** release APK as GitHub release assets. These artifacts are for development and testing; they are not Play Store-ready packages.
 
-## MCP endpoint
+## Project layout
 
-The embedded MCP server listens on `http://127.0.0.1:8765/mcp` while enabled in the foreground app. It is loopback-only in this increment. It implements stateless JSON responses for MCP initialization, tool discovery, and tool calls.
-
-For a same-device client, connect to loopback. For development from a computer, use Android Debug Bridge port forwarding:
-
-```bash
-adb forward tcp:8765 tcp:8765
+```text
+app/src/main/java/com/twinpower/andro/  Android app, workspace, GitHub, and MCP code
+app/src/test/                           JVM/Robolectric unit tests
+.github/workflows/                      Android CI and release workflow
 ```
-
-A cloud-hosted MCP client cannot reach a phone's loopback address. A future optional relay/tunnel or user-hosted reachable endpoint is needed for remote ChatGPT/Claude access. Do not expose this endpoint to a LAN or public network without authentication and transport security.
-
-## Current scope
-
-This is an implementation foundation, not a Play Store release. GitHub OAuth/version control, optional GitHub Actions, optional Vercel accounts/cloud sync, persistent background MCP service, release signing UI, and automatic runtime provisioning are subsequent milestones.
