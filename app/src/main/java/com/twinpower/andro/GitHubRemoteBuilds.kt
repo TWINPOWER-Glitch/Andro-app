@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -33,6 +34,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.time.Instant
 
 private fun runWasCreatedAfterDispatch(
@@ -56,6 +59,29 @@ private fun buildFailureSummary(run: GitHubWorkflowRun): String =
         else -> "The workflow completed with ${run.conclusion ?: "an unknown result"}."
     }
 
+private fun remoteActionError(action: String, error: Throwable): String {
+    val message = error.message.orEmpty()
+    return when {
+        error is UnknownHostException ->
+            "Can't reach GitHub to $action. Check your connection and try again."
+        error is SocketTimeoutException ->
+            "GitHub took too long to $action. Try again in a moment."
+        message.contains("GitHub API 401") ->
+            "GitHub authorization failed. Reconnect GitHub and try again."
+        message.contains("GitHub API 403") ->
+            "GitHub denied access. Check repository access and Actions permissions."
+        message.contains("GitHub API 404") ->
+            "GitHub could not find the repository, workflow, branch, or run. Check the saved settings."
+        message.contains("GitHub API 429") ->
+            "GitHub is limiting requests. Wait briefly, then try again."
+        Regex("GitHub API \\d{3}:").containsMatchIn(message) ->
+            "GitHub returned an error while trying to $action. Check the repository settings and retry."
+        message.isNotBlank() && !message.contains("Exception") &&
+            !message.contains("java.") -> message
+        else -> "Could not $action. Check your connection and try again."
+    }
+}
+
 @Composable
 fun GitHubRemoteBuilds(repository: ProjectRepository) {
     val context = LocalContext.current
@@ -67,6 +93,8 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
     }
 
     var projectsLoading by remember { mutableStateOf(true) }
+    var projectsLoadError by remember { mutableStateOf<String?>(null) }
+    var projectReloadRequest by remember { mutableIntStateOf(0) }
 
     val bindingStore = remember(context) {
         ProjectGitHubBindingStore(context)
@@ -79,6 +107,8 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
     var selectedProject by remember {
         mutableStateOf<ProjectInfo?>(null)
     }
+    var bindingLoadedProjectId by remember { mutableStateOf<String?>(null) }
+    var restoredRunsForProject by remember { mutableStateOf<String?>(null) }
 
     var selectedRunId by rememberSaveable {
         mutableStateOf<Long?>(null)
@@ -92,10 +122,10 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         mutableStateOf(false)
     }
 
-    var owner by remember { mutableStateOf("") }
-    var repositoryName by remember { mutableStateOf("") }
-    var branch by remember { mutableStateOf("main") }
-    var commitMessage by remember {
+    var owner by rememberSaveable { mutableStateOf("") }
+    var repositoryName by rememberSaveable { mutableStateOf("") }
+    var branch by rememberSaveable { mutableStateOf("main") }
+    var commitMessage by rememberSaveable {
         mutableStateOf("Build Android project with Andro")
     }
 
@@ -105,6 +135,9 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
     var selectedWorkflow by remember {
         mutableStateOf<GitHubWorkflow?>(null)
+    }
+    var selectedWorkflowId by rememberSaveable {
+        mutableStateOf<Long?>(null)
     }
 
     var workflowMenu by remember {
@@ -129,6 +162,16 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         mutableStateOf(
             "Connect GitHub in the GitHub Integration section first."
         )
+    }
+
+    fun clearRunTracking() {
+        selectedRun = null
+        selectedRunId = null
+        artifacts = emptyList()
+        trackedRepository = ""
+        trackedBranch = ""
+        trackedWorkflowId = null
+        trackedDispatchAt = ""
     }
 
     val tokenProvider = remember(context) {
@@ -157,7 +200,9 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
      * Restore the saved GitHub repository association whenever
      * the selected local project changes.
      */
-    LaunchedEffect(repository) {
+    LaunchedEffect(repository, projectReloadRequest) {
+        projectsLoading = true
+        projectsLoadError = null
         runCatching {
             withContext(Dispatchers.IO) {
                 repository.listProjects()
@@ -169,16 +214,19 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             selectedProjectId = selectedProject?.id
         }.onFailure {
             if (it is CancellationException) throw it
-            status = "Could not load local projects: ${it.message}"
+            projectsLoadError = remoteActionError("load local projects", it)
+            status = projectsLoadError.orEmpty()
         }
         projectsLoading = false
     }
 
     LaunchedEffect(selectedProject?.id) {
         val project = selectedProject
+        bindingLoadedProjectId = null
 
         workflows = emptyList()
         selectedWorkflow = null
+        selectedWorkflowId = null
         runs = emptyList()
         selectedRun = null
         artifacts = emptyList()
@@ -187,17 +235,27 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             owner = ""
             repositoryName = ""
             branch = "main"
+            bindingLoadedProjectId = null
             return@LaunchedEffect
         }
 
-        val savedBinding = runCatching {
-            bindingStore.get(project.id)
-        }.getOrNull()
+        val savedBinding = try {
+            withContext(Dispatchers.IO) {
+                bindingStore.get(project.id)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            status = remoteActionError("load saved GitHub settings", error)
+            bindingLoadedProjectId = project.id
+            return@LaunchedEffect
+        }
 
         if (savedBinding != null) {
             owner = savedBinding.owner
             repositoryName = savedBinding.repository
             branch = savedBinding.branch
+            selectedWorkflowId = savedBinding.workflowId
 
             status =
                 "Restored GitHub settings for ${project.name}. " +
@@ -206,10 +264,12 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             owner = ""
             repositoryName = ""
             branch = "main"
+            selectedWorkflowId = null
 
             status =
                 "No GitHub repository is saved for ${project.name}."
         }
+        bindingLoadedProjectId = project.id
     }
 
     fun repositoryParts(): Pair<String, String>? {
@@ -227,48 +287,55 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         return cleanOwner to cleanRepository
     }
 
-    fun saveRepositorySettings(): Boolean {
+    fun saveRepositorySettings() {
         val project = selectedProject
 
         if (project == null) {
             status = "Select a local project first."
-            return false
+            return
         }
 
-        val parts = repositoryParts() ?: return false
+        val parts = repositoryParts() ?: return
         val workflow = selectedWorkflow
 
         if (workflow == null) {
             status = "Load workflows and select a workflow before saving settings."
-            return false
+            return
         }
 
         if (workflow.state != "active") {
             status = "The selected GitHub workflow is not active."
-            return false
+            return
         }
 
-        return runCatching {
-            bindingStore.save(
-                ProjectGitHubBinding(
-                    projectId = project.id,
-                    owner = parts.first,
-                    repository = parts.second,
-                    branch = branch.trim(),
-                    workflowId = workflow.id
-                )
-            )
-        }.onSuccess {
-            status =
-                "GitHub settings saved for ${project.name}."
-        }.onFailure {
-            status = it.message
-                ?: "Could not save GitHub repository settings."
-        }.isSuccess
+        val targetBranch = branch.trim()
+        scope.launch {
+            loading = true
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    bindingStore.save(
+                        ProjectGitHubBinding(
+                            projectId = project.id,
+                            owner = parts.first,
+                            repository = parts.second,
+                            branch = targetBranch,
+                            workflowId = workflow.id
+                        )
+                    )
+                }
+            }.onSuccess {
+                status = "GitHub settings saved for ${project.name}."
+            }.onFailure {
+                if (it is CancellationException) throw it
+                status = remoteActionError("save GitHub settings", it)
+            }
+            loading = false
+        }
     }
 
     fun loadWorkflows() {
         val parts = repositoryParts() ?: return
+        val projectId = selectedProject?.id
 
         scope.launch {
             loading = true
@@ -279,21 +346,18 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     workflowManager.listWorkflows(
                         parts.first,
                         parts.second
-                    )
+                    ) to projectId?.let(bindingStore::get)
                 }
-            }.onSuccess { result ->
+            }.onSuccess { (result, savedBinding) ->
                 workflows = result
 
-                val savedBinding = selectedProject?.let {
-                    bindingStore.get(it.id)
-                }
-
                 selectedWorkflow = result.firstOrNull {
-                    it.id == savedBinding?.workflowId &&
+                    it.id == (selectedWorkflowId ?: savedBinding?.workflowId) &&
                         it.state == "active"
                 } ?: result.firstOrNull {
                     it.state == "active"
                 }
+                selectedWorkflowId = selectedWorkflow?.id
 
                 status = if (result.isEmpty()) {
                     "No workflows found. Add a workflow with workflow_dispatch."
@@ -302,7 +366,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 }
             }.onFailure {
                 if (it is CancellationException) throw it
-                status = it.message ?: "Could not load workflows."
+                status = remoteActionError("load workflows", it)
             }
 
             loading = false
@@ -311,6 +375,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
     fun loadRuns() {
         val parts = repositoryParts() ?: return
+        val targetBranch = branch.trim()
 
         scope.launch {
             loading = true
@@ -321,7 +386,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     workflowManager.listWorkflowRuns(
                         owner = parts.first,
                         repository = parts.second,
-                        branch = branch.trim().ifBlank { null },
+                        branch = targetBranch.ifBlank { null },
                         perPage = 20
                     )
                 }
@@ -329,7 +394,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 runs = result
                 val trackedRun = result.firstOrNull { run ->
                     trackedRepository == "${parts.first}/${parts.second}" &&
-                        trackedBranch == branch.trim() &&
+                        trackedBranch == targetBranch &&
                         trackedWorkflowId == run.workflowId &&
                         trackedDispatchAt.isNotBlank() &&
                         runWasCreatedAfterDispatch(
@@ -337,32 +402,91 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                             trackedDispatchAt
                         )
                 }
-                if (trackedRun != null) {
-                    selectedRun = trackedRun
-                    selectedRunId = trackedRun.id
-                    status = "Build run ${trackedRun.id} restored from the run list."
-                } else {
-                    selectedRun = result.firstOrNull { it.id == selectedRunId }
+                val runToRestore = trackedRun
+                    ?: result.firstOrNull { it.id == selectedRunId }
+                if (runToRestore == null) {
+                    selectedRun = null
+                    artifacts = emptyList()
                     status = if (trackedDispatchAt.isNotBlank() &&
                         trackedRepository == "${parts.first}/${parts.second}"
                     ) {
-                        "${result.size} recent run(s) loaded. The dispatched run may still be starting."
+                        "${result.size} recent runs loaded. The dispatched run may still be starting."
                     } else {
-                        "${result.size} recent workflow run(s) loaded."
+                        "${result.size} recent workflow runs loaded."
+                    }
+                } else {
+                    selectedRun = runToRestore
+                    selectedRunId = runToRestore.id
+                    status = "Restoring build run ${runToRestore.id}..."
+                    runCatching {
+                        orchestrator.refreshStatus(
+                            owner = parts.first,
+                            repository = parts.second,
+                            runId = runToRestore.id
+                        )
+                    }.onSuccess { build ->
+                        selectedRun = build.run
+                        artifacts = build.artifacts
+                        status = when {
+                            build.run.status != "completed" ->
+                                "Build run ${build.run.id} is ${build.run.status}."
+                            build.run.succeeded ->
+                                "Build run ${build.run.id} succeeded. " +
+                                    "${build.artifacts.size} artifact(s) available."
+                            else ->
+                                "${buildFailureSummary(build.run)} Run ${build.run.id}. " +
+                                    "Open GitHub to inspect failed job logs."
+                        }
+                    }.onFailure { error ->
+                        if (error is CancellationException) throw error
+                        status = "Run ${runToRestore.id} was found, but its latest status " +
+                            "could not be loaded. " +
+                            remoteActionError("refresh build status", error)
                     }
                 }
             }.onFailure {
                 if (it is CancellationException) throw it
-                status = it.message ?: "Could not load workflow runs."
+                status = remoteActionError("load workflow runs", it)
             }
 
             loading = false
         }
     }
 
+    LaunchedEffect(
+        bindingLoadedProjectId,
+        selectedProject?.id,
+        owner,
+        repositoryName,
+        branch,
+        selectedRunId,
+        trackedRepository,
+        trackedBranch,
+        trackedWorkflowId,
+        trackedDispatchAt
+    ) {
+        val projectId = selectedProject?.id
+        if (projectId == null || bindingLoadedProjectId != projectId ||
+            restoredRunsForProject == projectId
+        ) return@LaunchedEffect
+
+        val repositoryKey = "${owner.trim()}/${repositoryName.trim()}"
+        val hasRepository = owner.trim().matches(Regex("[A-Za-z0-9_.-]{1,100}")) &&
+            repositoryName.trim().matches(Regex("[A-Za-z0-9_.-]{1,100}"))
+        val trackedBuildMatchesRepository = trackedRepository == repositoryKey &&
+            trackedBranch == branch.trim()
+        val hasTrackedBuild = hasRepository &&
+            (selectedRunId != null ||
+                trackedDispatchAt.isNotBlank() && trackedBuildMatchesRepository)
+        if (hasTrackedBuild) loadRuns()
+        restoredRunsForProject = projectId
+    }
+
     fun synchronize(pull: Boolean) {
         val project = selectedProject
         val parts = repositoryParts()
+        val targetBranch = branch.trim()
+        val targetCommitMessage = commitMessage
 
         if (project == null) {
             status = "Create or import a local Android project first."
@@ -371,7 +495,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
         if (parts == null) return
 
-        if (branch.isBlank()) {
+        if (targetBranch.isBlank()) {
             status = "Enter a GitHub branch."
             return
         }
@@ -391,22 +515,22 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         project = project,
                         owner = parts.first,
                         repo = parts.second,
-                        branch = branch.trim()
+                        branch = targetBranch
                     )
                 } else {
                     sync.push(
                         project = project,
                         owner = parts.first,
                         repo = parts.second,
-                        branch = branch.trim(),
-                        commitMessage = commitMessage
+                        branch = targetBranch,
+                        commitMessage = targetCommitMessage
                     )
                 }
             }.onSuccess {
                 status = it.message
             }.onFailure {
                 if (it is CancellationException) throw it
-                status = it.message ?: "GitHub synchronization failed."
+                status = remoteActionError("synchronize project files", it)
             }
 
             loading = false
@@ -417,6 +541,8 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         val project = selectedProject
         val parts = repositoryParts()
         val workflow = selectedWorkflow
+        val targetBranch = branch.trim()
+        val targetCommitMessage = commitMessage
 
         if (project == null) {
             status = "Select a local Android project first."
@@ -435,7 +561,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             return
         }
 
-        if (branch.isBlank()) {
+        if (targetBranch.isBlank()) {
             status = "Enter the target GitHub branch."
             return
         }
@@ -448,20 +574,23 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             status = "Saving repository settings..."
 
             val bindingSaved = runCatching {
-                bindingStore.save(
-                    ProjectGitHubBinding(
-                        projectId = project.id,
-                        owner = parts.first,
-                        repository = parts.second,
-                        branch = branch.trim(),
-                        workflowId = workflow.id
+                withContext(Dispatchers.IO) {
+                    bindingStore.save(
+                        ProjectGitHubBinding(
+                            projectId = project.id,
+                            owner = parts.first,
+                            repository = parts.second,
+                            branch = targetBranch,
+                            workflowId = workflow.id
+                        )
                     )
-                )
+                }
             }
 
-            if (bindingSaved.isFailure) {
-                status = bindingSaved.exceptionOrNull()?.message
-                    ?: "Could not save GitHub repository settings."
+            val bindingError = bindingSaved.exceptionOrNull()
+            if (bindingError != null) {
+                if (bindingError is CancellationException) throw bindingError
+                status = remoteActionError("save GitHub settings", bindingError)
                 loading = false
                 return@launch
             }
@@ -474,9 +603,9 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     request = RemoteBuildRequest(
                         owner = parts.first,
                         repository = parts.second,
-                        branch = branch.trim(),
+                        branch = targetBranch,
                         workflowId = workflow.id,
-                        commitMessage = commitMessage
+                        commitMessage = targetCommitMessage
                     )
                 )
             }.onSuccess { dispatch ->
@@ -511,7 +640,12 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 }
             }.onFailure {
                 if (it is CancellationException) throw it
-                status = it.message ?: "Remote build dispatch failed."
+                status = if (it is RemoteBuildDispatchException) {
+                    "Project synchronized (${it.syncResult.filesProcessed} files), " +
+                        remoteActionError("dispatch the workflow", it.cause ?: it)
+                } else {
+                    remoteActionError("start the remote build", it)
+                }
             }
 
             loading = false
@@ -549,7 +683,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 }
             }.onFailure {
                 if (it is CancellationException) throw it
-                status = it.message ?: "Could not refresh build status."
+                status = remoteActionError("refresh build status", it)
             }
 
             loading = false
@@ -589,7 +723,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     "Project location: ${downloadedFile.absolutePath}"
             }.onFailure {
                 if (it is CancellationException) throw it
-                status = it.message ?: "Artifact download failed."
+                status = remoteActionError("download the artifact", it)
             }
 
             loading = false
@@ -597,8 +731,17 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
     }
 
     LaunchedEffect(Unit) {
-        if (tokenProvider() == null) {
-            status = "Connect GitHub above before using remote builds."
+        runCatching {
+            withContext(Dispatchers.IO) {
+                tokenProvider() != null
+            }
+        }.onSuccess { connected ->
+            if (!connected) {
+                status = "Connect GitHub above before using remote builds."
+            }
+        }.onFailure {
+            if (it is CancellationException) throw it
+            status = remoteActionError("check the GitHub connection", it)
         }
     }
 
@@ -630,7 +773,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = { projectMenu = true },
-                enabled = projects.isNotEmpty()
+                enabled = !loading && projects.isNotEmpty()
             ) {
                 Text(selectedProject?.name ?: "Select local project")
             }
@@ -646,9 +789,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                             selectedProject = project
                             selectedProjectId = project.id
                             projectMenu = false
-                            selectedRun = null
-                            selectedRunId = null
-                            artifacts = emptyList()
+                            clearRunTracking()
                         }
                     )
                 }
@@ -658,6 +799,19 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth()
                 )
+            } else if (projectsLoadError != null) {
+                Text(
+                    projectsLoadError.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !loading,
+                    onClick = { projectReloadRequest++ }
+                ) {
+                    Text("Retry loading projects")
+                }
             } else if (projects.isEmpty()) {
                 Text(
                     "Create or import a project in Workspace before synchronizing.",
@@ -672,20 +826,28 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             OutlinedTextField(
                 value = owner,
-                onValueChange = { owner = it },
+                onValueChange = {
+                    owner = it
+                    clearRunTracking()
+                },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("GitHub owner") },
                 placeholder = { Text("your-username") },
-                singleLine = true
+                singleLine = true,
+                enabled = !loading
             )
 
             OutlinedTextField(
                 value = repositoryName,
-                onValueChange = { repositoryName = it },
+                onValueChange = {
+                    repositoryName = it
+                    clearRunTracking()
+                },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Repository name") },
                 placeholder = { Text("android-project") },
-                singleLine = true
+                singleLine = true,
+                enabled = !loading
             )
 
             Text(
@@ -696,17 +858,22 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             OutlinedTextField(
                 value = branch,
-                onValueChange = { branch = it },
+                onValueChange = {
+                    branch = it
+                    clearRunTracking()
+                },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Branch") },
-                singleLine = true
+                singleLine = true,
+                enabled = !loading
             )
 
             OutlinedTextField(
                 value = commitMessage,
                 onValueChange = { commitMessage = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = { Text("Commit message") }
+                label = { Text("Commit message") },
+                enabled = !loading
             )
 
             Row(
@@ -760,7 +927,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = workflows.isNotEmpty(),
+                enabled = !loading && workflows.isNotEmpty(),
                 onClick = { workflowMenu = true }
             ) {
                 Text(
@@ -781,6 +948,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         },
                         onClick = {
                             selectedWorkflow = workflow
+                            selectedWorkflowId = workflow.id
                             workflowMenu = false
                         }
                     )

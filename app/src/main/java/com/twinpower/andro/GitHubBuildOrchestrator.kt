@@ -23,6 +23,14 @@ data class RemoteBuildDispatch(
     val syncResult: GitHubSyncResult
 )
 
+class RemoteBuildDispatchException(
+    val syncResult: GitHubSyncResult,
+    cause: IOException
+) : IOException(
+    "Project files were synchronized, but GitHub could not start the workflow.",
+    cause
+)
+
 data class RemoteBuildStatus(
     val run: GitHubWorkflowRun,
     val artifacts: List<GitHubArtifact>
@@ -78,12 +86,16 @@ class GitHubBuildOrchestrator(
         // take long enough that an earlier timestamp could match an unrelated run.
         val startedAt = Instant.now().toString()
 
-        workflows.dispatchWorkflow(
-            owner = request.owner,
-            repository = request.repository,
-            workflowId = request.workflowId.toString(),
-            branch = request.branch
-        )
+        try {
+            workflows.dispatchWorkflow(
+                owner = request.owner,
+                repository = request.repository,
+                workflowId = request.workflowId.toString(),
+                branch = request.branch
+            )
+        } catch (error: IOException) {
+            throw RemoteBuildDispatchException(syncResult, error)
+        }
 
         RemoteBuildDispatch(
             repository = "${request.owner}/${request.repository}",
