@@ -1,6 +1,10 @@
 
 package com.twinpower.andro
 
+import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,8 +36,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.time.Instant
@@ -81,6 +90,113 @@ private fun remoteActionError(action: String, error: Throwable): String {
         else -> "Could not $action. Check your connection and try again."
     }
 }
+
+private const val MAX_ARTIFACT_APK_COUNT = 50
+private const val MAX_ARTIFACT_APK_BYTES = 500L * 1024L * 1024L
+private const val APK_EXPORT_TIMEOUT_MILLIS = 15 * 60 * 1000L
+
+private data class DownloadedApk(
+    val file: File,
+    val name: String,
+    val sizeBytes: Long
+)
+
+private fun artifactDirectory(project: ProjectInfo, artifactId: Long): File {
+    require(artifactId > 0) { "Invalid artifact ID." }
+
+    val projectRoot = File(project.rootPath).canonicalFile
+    require(projectRoot.isDirectory) { "The selected project directory is unavailable." }
+
+    val artifactRoot = File(projectRoot, "build/andro-artifacts").canonicalFile
+    require(artifactRoot.path.startsWith(projectRoot.path + File.separator)) {
+        "Artifact directory is outside the selected project."
+    }
+
+    val directory = File(artifactRoot, "artifact-$artifactId").canonicalFile
+    require(directory.path.startsWith(artifactRoot.path + File.separator) && directory.isDirectory) {
+        "Downloaded artifact files are unavailable. Download the artifact again."
+    }
+    return directory
+}
+
+private fun findArtifactApks(project: ProjectInfo, artifactId: Long): List<DownloadedApk> {
+    val directory = artifactDirectory(project, artifactId)
+    val files = directory.walkTopDown()
+        .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
+        .take(MAX_ARTIFACT_APK_COUNT + 1)
+        .toList()
+
+    require(files.size <= MAX_ARTIFACT_APK_COUNT) {
+        "This artifact contains too many APK files to list."
+    }
+
+    return files.map { file ->
+        val canonical = file.canonicalFile
+        require(canonical.path.startsWith(directory.path + File.separator)) {
+            "An APK path is outside the downloaded artifact."
+        }
+        val sizeBytes = canonical.length()
+        require(sizeBytes in 1..MAX_ARTIFACT_APK_BYTES) {
+            "${canonical.name} is empty or exceeds the 500 MB export limit."
+        }
+        DownloadedApk(
+            file = canonical,
+            name = canonical.name,
+            sizeBytes = sizeBytes
+        )
+    }.sortedBy { it.file.relativeTo(directory).invariantSeparatorsPath }
+}
+
+private fun resolveArtifactApk(
+    project: ProjectInfo,
+    artifactId: Long,
+    sourcePath: String
+): File {
+    val directory = artifactDirectory(project, artifactId)
+    val source = File(sourcePath).canonicalFile
+    require(source.path.startsWith(directory.path + File.separator)) {
+        "APK path is outside the downloaded artifact."
+    }
+    require(source.isFile && source.extension.equals("apk", ignoreCase = true)) {
+        "The selected APK is no longer available. Download the artifact again."
+    }
+    return source
+}
+
+private suspend fun exportApk(
+    context: Context,
+    source: File,
+    destination: Uri
+): Long = withTimeoutOrNull(APK_EXPORT_TIMEOUT_MILLIS) {
+    withContext(Dispatchers.IO) {
+        require(source.isFile && source.extension.equals("apk", ignoreCase = true)) {
+            "Select a valid APK file."
+        }
+        require(source.length() in 1..MAX_ARTIFACT_APK_BYTES) {
+            "APK is empty or exceeds the 500 MB export limit."
+        }
+
+        val output = context.contentResolver.openOutputStream(destination, "wt")
+            ?: throw IOException("Could not open the selected save location.")
+        var bytesCopied = 0L
+        output.buffered().use { stream ->
+            source.inputStream().buffered().use { input ->
+                val buffer = ByteArray(32 * 1024)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val count = input.read(buffer)
+                    if (count == -1) break
+                    bytesCopied += count
+                    require(bytesCopied <= MAX_ARTIFACT_APK_BYTES) {
+                        "APK exceeds the 500 MB export limit."
+                    }
+                    stream.write(buffer, 0, count)
+                }
+            }
+        }
+        bytesCopied
+    }
+} ?: throw IOException("Saving the APK timed out. Choose a local folder and retry.")
 
 @Composable
 fun GitHubRemoteBuilds(repository: ProjectRepository) {
@@ -156,6 +272,25 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
         mutableStateOf<List<GitHubArtifact>>(emptyList())
     }
 
+    var downloadedArtifactId by rememberSaveable {
+        mutableStateOf<Long?>(null)
+    }
+    var downloadedApks by remember {
+        mutableStateOf<List<DownloadedApk>>(emptyList())
+    }
+    var downloadedApksLoading by remember { mutableStateOf(false) }
+    var downloadedApksError by remember { mutableStateOf<String?>(null) }
+    var downloadedApkRefresh by remember { mutableIntStateOf(0) }
+    var pendingExportProjectId by rememberSaveable {
+        mutableStateOf<String?>(null)
+    }
+    var pendingExportArtifactId by rememberSaveable {
+        mutableStateOf<Long?>(null)
+    }
+    var pendingExportSourcePath by rememberSaveable {
+        mutableStateOf<String?>(null)
+    }
+
     var loading by remember { mutableStateOf(false) }
 
     var status by remember {
@@ -194,6 +329,44 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
     val orchestrator = remember(sync, workflowManager) {
         GitHubBuildOrchestrator(sync, workflowManager)
+    }
+
+    val apkExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.android.package-archive")
+    ) { destination ->
+        val projectId = pendingExportProjectId
+        val artifactId = pendingExportArtifactId
+        val sourcePath = pendingExportSourcePath
+        pendingExportProjectId = null
+        pendingExportArtifactId = null
+        pendingExportSourcePath = null
+
+        if (destination != null && projectId != null &&
+            artifactId != null && sourcePath != null
+        ) {
+            scope.launch {
+                loading = true
+                status = "Saving APK to the selected location..."
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val project = repository.getProject(projectId)
+                        val apk = resolveArtifactApk(
+                            project,
+                            artifactId,
+                            sourcePath
+                        )
+                        apk to exportApk(context, apk, destination)
+                    }
+                }.onSuccess { (apk, bytesCopied) ->
+                    status = "Saved ${apk.name} to the selected location " +
+                        "(${bytesCopied / 1024} KB)."
+                }.onFailure {
+                    if (it is CancellationException) throw it
+                    status = remoteActionError("save the APK", it)
+                }
+                loading = false
+            }
+        }
     }
 
     /**
@@ -270,6 +443,31 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                 "No GitHub repository is saved for ${project.name}."
         }
         bindingLoadedProjectId = project.id
+    }
+
+    LaunchedEffect(
+        selectedProject?.id,
+        downloadedArtifactId,
+        downloadedApkRefresh
+    ) {
+        val project = selectedProject
+        val artifactId = downloadedArtifactId
+        downloadedApks = emptyList()
+        downloadedApksError = null
+        if (project == null || artifactId == null) return@LaunchedEffect
+
+        downloadedApksLoading = true
+        runCatching {
+            withContext(Dispatchers.IO) {
+                findArtifactApks(project, artifactId)
+            }
+        }.onSuccess { files ->
+            downloadedApks = files
+        }.onFailure {
+            if (it is CancellationException) throw it
+            downloadedApksError = remoteActionError("load downloaded APKs", it)
+        }
+        downloadedApksLoading = false
     }
 
     fun repositoryParts(): Pair<String, String>? {
@@ -717,10 +915,10 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                     repository = parts.second,
                     artifact = artifact
                 )
-            }.onSuccess { downloadedFile ->
+            }.onSuccess {
+                downloadedArtifactId = artifact.id
                 status =
-                    "${artifact.name} downloaded and extracted. " +
-                    "Project location: ${downloadedFile.absolutePath}"
+                    "${artifact.name} downloaded. Searching it for APK files..."
             }.onFailure {
                 if (it is CancellationException) throw it
                 status = remoteActionError("download the artifact", it)
@@ -728,6 +926,20 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
 
             loading = false
         }
+    }
+
+    fun saveApkToDevice(apk: DownloadedApk) {
+        val projectId = selectedProject?.id
+        val artifactId = downloadedArtifactId
+        if (projectId == null || artifactId == null) {
+            status = "Select a project and download an artifact first."
+            return
+        }
+
+        pendingExportProjectId = projectId
+        pendingExportArtifactId = artifactId
+        pendingExportSourcePath = apk.file.absolutePath
+        apkExportLauncher.launch(apk.name)
     }
 
     LaunchedEffect(Unit) {
@@ -790,6 +1002,7 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                             selectedProjectId = project.id
                             projectMenu = false
                             clearRunTracking()
+                            downloadedArtifactId = null
                         }
                     )
                 }
@@ -1108,6 +1321,65 @@ fun GitHubRemoteBuilds(repository: ProjectRepository) {
                         "build/andro-artifacts directory.",
                     style = MaterialTheme.typography.bodySmall
                 )
+            }
+
+            if (downloadedArtifactId != null) {
+                HorizontalDivider()
+                Text(
+                    "DOWNLOADED APK FILES",
+                    fontWeight = FontWeight.Bold
+                )
+
+                when {
+                    downloadedApksLoading -> {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    downloadedApksError != null -> {
+                        Text(
+                            downloadedApksError.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        OutlinedButton(
+                            enabled = !loading,
+                            onClick = { downloadedApkRefresh++ }
+                        ) {
+                            Text("Retry finding APK files")
+                        }
+                    }
+
+                    downloadedApks.isEmpty() -> {
+                        Text(
+                            "This artifact contains no APK files that Andro can export.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+
+                    else -> downloadedApks.forEach { apk ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(apk.name, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${apk.sizeBytes / 1024} KB",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            OutlinedButton(
+                                enabled = !loading,
+                                onClick = { saveApkToDevice(apk) }
+                            ) {
+                                Text("Save APK")
+                            }
+                        }
+                    }
+                }
             }
 
             if (loading) {
